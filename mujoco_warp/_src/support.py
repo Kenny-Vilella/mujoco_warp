@@ -265,12 +265,17 @@ def contact_force(
   force = wp.spatial_vector(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)
 
   if efc_address >= 0:
+    worldid = d.contact.worldid[contact_id]
     condim = d.contact.dim[contact_id]
+
+    wp.printf("==== %u  %u   %u  %f  %f  %f  %f  %f  %f\n", efc_address, contact_id, condim,
+              d.efc.force[worldid, efc_address], d.efc.force[worldid, efc_address+1], d.efc.force[worldid, efc_address+2],
+              d.efc.force[worldid, efc_address+3], d.efc.force[worldid, efc_address+4], d.efc.force[worldid, efc_address+5])
 
     # TODO(team): add support for elliptical cone type
     if m.opt.cone == int(mujoco.mjtCone.mjCONE_PYRAMIDAL.value):
       force = _decode_pyramid(
-        d.efc.force, efc_address, d.contact.friction[contact_id], condim
+        d.efc.force[worldid], efc_address, d.contact.friction[contact_id], condim
       )
 
     if to_world_frame:

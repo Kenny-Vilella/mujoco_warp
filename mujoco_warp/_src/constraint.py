@@ -23,6 +23,7 @@ from .warp_util import event_scope
 
 @wp.func
 def _update_efc_row(
+  worldid: int,
   m: types.Model,
   d: types.Data,
   efcid: wp.int32,
@@ -69,11 +70,11 @@ def _update_efc_row(
   imp = wp.where(imp_x > 1.0, dmax, imp)
 
   # Update constraints
-  d.efc.D[efcid] = 1.0 / wp.max(invweight * (1.0 - imp) / imp, types.MJ_MINVAL)
-  d.efc.aref[efcid] = -k * imp * pos_aref - b * Jqvel
-  d.efc.pos[efcid] = pos_aref + margin
-  d.efc.margin[efcid] = margin
-  d.efc.frictionloss[efcid] = frictionloss
+  d.efc.D[worldid, efcid] = 1.0 / wp.max(invweight * (1.0 - imp) / imp, types.MJ_MINVAL)
+  d.efc.aref[worldid, efcid] = -k * imp * pos_aref - b * Jqvel
+  d.efc.pos[worldid, efcid] = pos_aref + margin
+  d.efc.margin[worldid, efcid] = margin
+  d.efc.frictionloss[worldid, efcid] = frictionloss
 
 
 @wp.func
@@ -122,9 +123,8 @@ def _efc_equality_connect(
   if not d.eq_active[worldid, i_eq]:
     return
 
-  efcid = wp.atomic_add(d.nefc, 0, 3)
+  efcid = wp.atomic_add(d.nefc, worldid, 3)
   wp.atomic_add(d.ne, 0, 3)
-  d.efc.worldid[efcid] = worldid
 
   data = m.eq_data[i_eq]
   anchor1 = wp.vec3f(data[0], data[1], data[2])
@@ -151,9 +151,9 @@ def _efc_equality_connect(
     jacp1, _ = _jac(m, d, pos1, body1id, dofid, worldid)
     jacp2, _ = _jac(m, d, pos2, body2id, dofid, worldid)
     j1mj2 = jacp1 - jacp2
-    d.efc.J[efcid, dofid] = j1mj2[0]
-    d.efc.J[efcid + 1, dofid] = j1mj2[1]
-    d.efc.J[efcid + 2, dofid] = j1mj2[2]
+    d.efc.J[worldid, efcid, dofid] = j1mj2[0]
+    d.efc.J[worldid, efcid + 1, dofid] = j1mj2[1]
+    d.efc.J[worldid, efcid + 2, dofid] = j1mj2[2]
     Jqvel += j1mj2 * d.qvel[worldid, dofid]
 
   invweight = m.body_invweight0[body1id, 0] + m.body_invweight0[body2id, 0]
@@ -161,6 +161,7 @@ def _efc_equality_connect(
 
   for i in range(3):
     _update_efc_row(
+      worldid,
       m,
       d,
       efcid + i,
@@ -187,16 +188,15 @@ def _efc_equality_joint(
   if not d.eq_active[worldid, i_eq]:
     return
 
-  efcid = wp.atomic_add(d.nefc, 0, 1)
+  efcid = wp.atomic_add(d.nefc, worldid, 1)
   wp.atomic_add(d.ne, 0, 1)
-  d.efc.worldid[efcid] = worldid
 
   jntid_1 = m.eq_obj1id[i_eq]
   jntid_2 = m.eq_obj2id[i_eq]
   data = m.eq_data[i_eq]
   dofadr1 = m.jnt_dofadr[jntid_1]
   qposadr1 = m.jnt_qposadr[jntid_1]
-  d.efc.J[efcid, dofadr1] = 1.0
+  d.efc.J[worldid, efcid, dofadr1] = 1.0
 
   if jntid_2 > -1:
     # Two joint constraint
@@ -214,7 +214,7 @@ def _efc_equality_joint(
     Jqvel = d.qvel[worldid, dofadr1] - d.qvel[worldid, dofadr2] * deriv_2
     invweight = m.dof_invweight0[dofadr1] + m.dof_invweight0[dofadr2]
 
-    d.efc.J[efcid, dofadr2] = -deriv_2
+    d.efc.J[worldid, efcid, dofadr2] = -deriv_2
   else:
     # Single joint constraint
     pos = d.qpos[worldid, qposadr1] - m.qpos0[qposadr1] - data[0]
@@ -223,6 +223,7 @@ def _efc_equality_joint(
 
   # Update constraint parameters
   _update_efc_row(
+    worldid,
     m,
     d,
     efcid,
@@ -250,14 +251,14 @@ def _efc_friction(
   if m.dof_frictionloss[dofid] <= 0.0:
     return
 
-  efcid = wp.atomic_add(d.nefc, 0, 1)
+  efcid = wp.atomic_add(d.nefc, worldid, 1)
   wp.atomic_add(d.nf, 0, 1)
-  d.efc.worldid[efcid] = worldid
 
-  d.efc.J[efcid, dofid] = 1.0
+  d.efc.J[worldid, efcid, dofid] = 1.0
   Jqvel = d.qvel[worldid, dofid]
 
   _update_efc_row(
+    worldid,
     m,
     d,
     efcid,
@@ -289,16 +290,16 @@ def _efc_limit_slide_hinge(
   active = pos < 0
 
   if active:
-    efcid = wp.atomic_add(d.nefc, 0, 1)
-    d.efc.worldid[efcid] = worldid
+    efcid = wp.atomic_add(d.nefc, worldid, 1)
 
     dofadr = m.jnt_dofadr[jntid]
 
     J = float(dist_min < dist_max) * 2.0 - 1.0
-    d.efc.J[efcid, dofadr] = J
+    d.efc.J[worldid, efcid, dofadr] = J
     Jqvel = J * d.qvel[worldid, dofadr]
 
     _update_efc_row(
+      worldid,
       m,
       d,
       efcid,
@@ -337,9 +338,8 @@ def _efc_contact_pyramidal(
   active = pos < 0
 
   if active:
-    efcid = wp.atomic_add(d.nefc, 0, 1)
     worldid = d.contact.worldid[conid]
-    d.efc.worldid[efcid] = worldid
+    efcid = wp.atomic_add(d.nefc, worldid, 1)
 
     geom = d.contact.geom[conid]
     body1 = m.geom_bodyid[geom[0]]
@@ -382,10 +382,11 @@ def _efc_contact_pyramidal(
         else:
           J -= Ji * frii
 
-      d.efc.J[efcid, i] = J
+      d.efc.J[worldid, efcid, i] = J
       Jqvel += J * d.qvel[worldid, i]
 
     _update_efc_row(
+      worldid,
       m,
       d,
       efcid,
@@ -433,9 +434,8 @@ def _efc_contact_elliptic(
   active = pos < 0.0
 
   if active:
-    efcid = wp.atomic_add(d.nefc, 0, 1)
     worldid = d.contact.worldid[conid]
-    d.efc.worldid[efcid] = worldid
+    efcid = wp.atomic_add(d.nefc, worldid, 1)
     d.contact.efc_address[conid, dimid] = efcid
 
     geom = d.contact.geom[conid]
@@ -455,7 +455,7 @@ def _efc_contact_elliptic(
       for xyz in range(3):
         J += frame[dimid, xyz] * jac_dif[xyz]
 
-      d.efc.J[efcid, i] = J
+      d.efc.J[worldid, efcid, i] = J
       Jqvel += J * d.qvel[worldid, i]
 
     invweight = m.body_invweight0[body1, 0] + m.body_invweight0[body2, 0]
@@ -483,6 +483,7 @@ def _efc_contact_elliptic(
       pos_aref = 0.0
 
     _update_efc_row(
+      worldid,
       m,
       d,
       efcid,

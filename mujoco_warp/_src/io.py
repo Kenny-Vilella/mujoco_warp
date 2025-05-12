@@ -554,16 +554,15 @@ def put_model(mjm: mujoco.MjModel) -> types.Model:
 def _constraint(mjm: mujoco.MjModel, nworld: int, njmax: int) -> types.Constraint:
   efc = types.Constraint()
 
-  efc.J = wp.zeros((njmax, mjm.nv), dtype=wp.float32)
-  efc.D = wp.zeros((njmax,), dtype=wp.float32)
-  efc.pos = wp.zeros((njmax,), dtype=wp.float32)
-  efc.aref = wp.zeros((njmax,), dtype=wp.float32)
-  efc.frictionloss = wp.zeros((njmax,), dtype=wp.float32)
-  efc.force = wp.zeros((njmax,), dtype=wp.float32)
-  efc.margin = wp.zeros((njmax,), dtype=wp.float32)
-  efc.worldid = wp.zeros((njmax,), dtype=wp.int32)
+  efc.J = wp.zeros((nworld, njmax, mjm.nv), dtype=wp.float32)
+  efc.D = wp.zeros((nworld, njmax), dtype=wp.float32)
+  efc.pos = wp.zeros((nworld, njmax), dtype=wp.float32)
+  efc.aref = wp.zeros((nworld, njmax), dtype=wp.float32)
+  efc.frictionloss = wp.zeros((nworld, njmax), dtype=wp.float32)
+  efc.force = wp.zeros((nworld, njmax), dtype=wp.float32)
+  efc.margin = wp.zeros((nworld, njmax), dtype=wp.float32)
 
-  efc.Jaref = wp.empty(shape=(njmax,), dtype=wp.float32)
+  efc.Jaref = wp.empty(shape=(nworld, njmax), dtype=wp.float32)
   efc.Ma = wp.empty(shape=(nworld, mjm.nv), dtype=wp.float32)
   efc.grad = wp.empty(shape=(nworld, mjm.nv), dtype=wp.float32)
   efc.grad_dot = wp.empty(shape=(nworld,), dtype=wp.float32)
@@ -574,11 +573,11 @@ def _constraint(mjm: mujoco.MjModel, nworld: int, njmax: int) -> types.Constrain
   efc.cost = wp.empty(shape=(nworld,), dtype=wp.float32)
   efc.prev_cost = wp.empty(shape=(nworld,), dtype=wp.float32)
   efc.solver_niter = wp.empty(shape=(nworld,), dtype=wp.int32)
-  efc.active = wp.empty(shape=(njmax,), dtype=bool)
+  efc.active = wp.empty(shape=(nworld, njmax,), dtype=bool)
   efc.gtol = wp.empty(shape=(nworld,), dtype=wp.float32)
   efc.mv = wp.empty(shape=(nworld, mjm.nv), dtype=wp.float32)
-  efc.jv = wp.empty(shape=(njmax,), dtype=wp.float32)
-  efc.quad = wp.empty(shape=(njmax,), dtype=wp.vec3f)
+  efc.jv = wp.empty(shape=(nworld, njmax,), dtype=wp.float32)
+  efc.quad = wp.empty(shape=(nworld, njmax,), dtype=wp.vec3f)
   efc.quad_gauss = wp.empty(shape=(nworld,), dtype=wp.vec3f)
   efc.h = wp.empty(shape=(nworld, mjm.nv, mjm.nv), dtype=wp.float32)
   efc.alpha = wp.empty(shape=(nworld,), dtype=wp.float32)
@@ -628,7 +627,7 @@ def make_data(
 
   d.ncon = wp.zeros(1, dtype=wp.int32)
   d.ne = wp.zeros(1, dtype=wp.int32, ndim=1)
-  d.nefc = wp.zeros(1, dtype=wp.int32, ndim=1)
+  d.nefc = wp.zeros(nworld, dtype=wp.int32, ndim=1)
   d.ne = wp.zeros(1, dtype=wp.int32)
   d.nf = wp.zeros(1, dtype=wp.int32)
   d.nl = wp.zeros(1, dtype=wp.int32)
@@ -765,7 +764,7 @@ def put_data(
   # TODO(team): better heuristic for nconmax
   nconmax = nconmax or max(512, mjd.ncon * nworld)
   # TODO(team): better heuristic for njmax
-  njmax = njmax or max(512, mjd.nefc * nworld)
+  njmax = njmax or max(512, mjd.nefc)
 
   if nworld < 1:
     raise ValueError("nworld must be >= 1")
@@ -779,24 +778,24 @@ def put_data(
   if nworld * mjd.ncon > nconmax:
     raise ValueError(f"nconmax overflow (nconmax must be >= {nworld * mjd.ncon})")
 
-  if nworld * mjd.nefc > njmax:
-    raise ValueError(f"njmax overflow (njmax must be >= {nworld * mjd.nefc})")
+  if mjd.nefc > njmax:
+    raise ValueError(f"njmax overflow (njmax must be >= {mjd.nefc})")
 
   d.nworld = nworld
   # TODO(team): move nconmax and njmax to Model?
   d.nconmax = nconmax
   d.njmax = njmax
 
+  # TODO(erikfrey): would it be better to tile on the gpu?
+  def tile(x):
+    return np.tile(x, (nworld,) + (1,) * len(x.shape))
+
   d.ncon = wp.array([mjd.ncon * nworld], dtype=wp.int32, ndim=1)
   d.ne = wp.array([mjd.ne * nworld], dtype=wp.int32, ndim=1)
   d.nf = wp.array([mjd.nf * nworld], dtype=wp.int32, ndim=1)
   d.nl = wp.array([mjd.nl * nworld], dtype=wp.int32, ndim=1)
-  d.nefc = wp.array([mjd.nefc * nworld], dtype=wp.int32, ndim=1)
+  d.nefc = wp.full(nworld, mjd.nefc, dtype=wp.int32, ndim=1)
   d.time = mjd.time
-
-  # TODO(erikfrey): would it be better to tile on the gpu?
-  def tile(x):
-    return np.tile(x, (nworld,) + (1,) * len(x.shape))
 
   if support.is_sparse(mjm):
     qM = np.expand_dims(mjd.qM, axis=0)
@@ -872,36 +871,6 @@ def put_data(
   d.act = wp.array(tile(mjd.act), dtype=wp.float32, ndim=2)
   d.act_dot = wp.array(tile(mjd.act_dot), dtype=wp.float32, ndim=2)
 
-  nefc = mjd.nefc
-  efc_worldid = np.zeros(njmax, dtype=int)
-
-  for i in range(nworld):
-    efc_worldid[i * nefc : (i + 1) * nefc] = i
-
-  nefc_fill = njmax - nworld * nefc
-
-  efc_J_fill = np.vstack(
-    [np.repeat(efc_J, nworld, axis=0), np.zeros((nefc_fill, mjm.nv))]
-  )
-  efc_D_fill = np.concatenate(
-    [np.repeat(mjd.efc_D, nworld, axis=0), np.zeros(nefc_fill)]
-  )
-  efc_pos_fill = np.concatenate(
-    [np.repeat(mjd.efc_pos, nworld, axis=0), np.zeros(nefc_fill)]
-  )
-  efc_aref_fill = np.concatenate(
-    [np.repeat(mjd.efc_aref, nworld, axis=0), np.zeros(nefc_fill)]
-  )
-  efc_frictionloss_fill = np.concatenate(
-    [np.repeat(mjd.efc_frictionloss, nworld, axis=0), np.zeros(nefc_fill)]
-  )
-  efc_force_fill = np.concatenate(
-    [np.repeat(mjd.efc_force, nworld, axis=0), np.zeros(nefc_fill)]
-  )
-  efc_margin_fill = np.concatenate(
-    [np.repeat(mjd.efc_margin, nworld, axis=0), np.zeros(nefc_fill)]
-  )
-
   ncon = mjd.ncon
   condim_max = np.max(mjm.geom_condim)
   con_efc_address = np.zeros((nconmax, condim_max), dtype=int)
@@ -963,14 +932,33 @@ def put_data(
   d.contact.worldid = wp.array(con_worldid, dtype=wp.int32, ndim=1)
 
   d.efc = _constraint(mjm, d.nworld, d.njmax)
-  d.efc.J = wp.array(efc_J_fill, dtype=wp.float32, ndim=2)
-  d.efc.D = wp.array(efc_D_fill, dtype=wp.float32, ndim=1)
-  d.efc.pos = wp.array(efc_pos_fill, dtype=wp.float32, ndim=1)
-  d.efc.aref = wp.array(efc_aref_fill, dtype=wp.float32, ndim=1)
-  d.efc.frictionloss = wp.array(efc_frictionloss_fill, dtype=wp.float32, ndim=1)
-  d.efc.force = wp.array(efc_force_fill, dtype=wp.float32, ndim=1)
-  d.efc.margin = wp.array(efc_margin_fill, dtype=wp.float32, ndim=1)
-  d.efc.worldid = wp.from_numpy(efc_worldid, dtype=wp.int32)
+
+  nefc = mjd.nefc
+  efc_J_fill = np.zeros((nworld, njmax, mjm.nv))
+  efc_D_fill = np.zeros((nworld, njmax))
+  efc_pos_fill = np.zeros((nworld, njmax))
+  efc_aref_fill = np.zeros((nworld, njmax))
+  efc_frictionloss_fill = np.zeros((nworld, njmax))
+  efc_force_fill = np.zeros((nworld, njmax))
+  efc_margin_fill = np.zeros((nworld, njmax))
+
+  nefc = mjd.nefc
+  for i in range(nworld):
+    efc_J_fill[i, :nefc, :] = efc_J
+    efc_D_fill[i, :nefc] = mjd.efc_D
+    efc_pos_fill[i, :nefc] = mjd.efc_pos
+    efc_aref_fill[i, :nefc] = mjd.efc_aref
+    efc_frictionloss_fill[i, :nefc] = mjd.efc_frictionloss
+    efc_force_fill[i, :nefc] = mjd.efc_force
+    efc_margin_fill[i, :nefc] = mjd.efc_margin
+
+  d.efc.J = wp.array(efc_J_fill, dtype=wp.float32, ndim=3)
+  d.efc.D = wp.array(efc_D_fill, dtype=wp.float32, ndim=2)
+  d.efc.pos = wp.array(efc_pos_fill, dtype=wp.float32, ndim=2)
+  d.efc.aref = wp.array(efc_aref_fill, dtype=wp.float32, ndim=2)
+  d.efc.frictionloss = wp.array(efc_frictionloss_fill, dtype=wp.float32, ndim=2)
+  d.efc.force = wp.array(efc_force_fill, dtype=wp.float32, ndim=2)
+  d.efc.margin = wp.array(efc_margin_fill, dtype=wp.float32, ndim=2)
 
   d.xfrc_applied = wp.array(tile(mjd.xfrc_applied), dtype=wp.spatial_vector, ndim=2)
   d.eq_active = wp.array(tile(mjm.eq_active0), dtype=wp.bool, ndim=2)
@@ -1035,117 +1023,4 @@ def get_data_into(
   d: types.Data,
 ):
   """Gets Data from a device into an existing mujoco.MjData."""
-  if d.nworld > 1:
-    raise NotImplementedError("only nworld == 1 supported for now")
-
-  ncon = d.ncon.numpy()[0]
-  nefc = d.nefc.numpy()[0]
-
-  if ncon != result.ncon or nefc != result.nefc:
-    mujoco._functions._realloc_con_efc(result, ncon=ncon, nefc=nefc)
-
-  result.time = d.time
-  result.ne = d.ne.numpy()[0]
-  result.qpos[:] = d.qpos.numpy()[0]
-  result.qvel[:] = d.qvel.numpy()[0]
-  result.qacc_warmstart = d.qacc_warmstart.numpy()[0]
-  result.qfrc_applied = d.qfrc_applied.numpy()[0]
-  result.mocap_pos = d.mocap_pos.numpy()[0]
-  result.mocap_quat = d.mocap_quat.numpy()[0]
-  result.qacc = d.qacc.numpy()[0]
-  result.xanchor = d.xanchor.numpy()[0]
-  result.xaxis = d.xaxis.numpy()[0]
-  result.xmat = d.xmat.numpy().reshape((-1, 9))
-  result.xpos = d.xpos.numpy()[0]
-  result.xquat = d.xquat.numpy()[0]
-  result.xipos = d.xipos.numpy()[0]
-  result.ximat = d.ximat.numpy().reshape((-1, 9))
-  result.subtree_com = d.subtree_com.numpy()[0]
-  result.geom_xpos = d.geom_xpos.numpy()[0]
-  result.geom_xmat = d.geom_xmat.numpy().reshape((-1, 9))
-  result.site_xpos = d.site_xpos.numpy()[0]
-  result.site_xmat = d.site_xmat.numpy().reshape((-1, 9))
-  result.cam_xpos = d.cam_xpos.numpy()[0]
-  result.cam_xmat = d.cam_xmat.numpy().reshape((-1, 9))
-  result.light_xpos = d.light_xpos.numpy()[0]
-  result.light_xdir = d.light_xdir.numpy()[0]
-  result.cinert = d.cinert.numpy()[0]
-  result.cdof = d.cdof.numpy()[0]
-  result.crb = d.crb.numpy()[0]
-  result.qLDiagInv = d.qLDiagInv.numpy()[0]
-  result.ctrl = d.ctrl.numpy()[0]
-  result.ten_velocity = d.ten_velocity.numpy()[0]
-  result.actuator_velocity = d.actuator_velocity.numpy()[0]
-  result.actuator_force = d.actuator_force.numpy()[0]
-  result.actuator_length = d.actuator_length.numpy()[0]
-  mujoco.mju_dense2sparse(
-    result.actuator_moment,
-    d.actuator_moment.numpy()[0],
-    result.moment_rownnz,
-    result.moment_rowadr,
-    result.moment_colind,
-  )
-  result.cvel = d.cvel.numpy()[0]
-  result.cdof_dot = d.cdof_dot.numpy()[0]
-  result.qfrc_bias = d.qfrc_bias.numpy()[0]
-  result.qfrc_passive = d.qfrc_passive.numpy()[0]
-  result.subtree_linvel = d.subtree_linvel.numpy()[0]
-  result.subtree_angmom = d.subtree_angmom.numpy()[0]
-  result.qfrc_spring = d.qfrc_spring.numpy()[0]
-  result.qfrc_damper = d.qfrc_damper.numpy()[0]
-  result.qfrc_actuator = d.qfrc_actuator.numpy()[0]
-  result.qfrc_smooth = d.qfrc_smooth.numpy()[0]
-  result.qfrc_constraint = d.qfrc_constraint.numpy()[0]
-  result.qacc_smooth = d.qacc_smooth.numpy()[0]
-  result.act = d.act.numpy()[0]
-  result.act_dot = d.act_dot.numpy()[0]
-
-  result.contact.dist[:] = d.contact.dist.numpy()[:ncon]
-  result.contact.pos[:] = d.contact.pos.numpy()[:ncon]
-  result.contact.frame[:] = d.contact.frame.numpy()[:ncon].reshape((-1, 9))
-  result.contact.includemargin[:] = d.contact.includemargin.numpy()[:ncon]
-  result.contact.friction[:] = d.contact.friction.numpy()[:ncon]
-  result.contact.solref[:] = d.contact.solref.numpy()[:ncon]
-  result.contact.solreffriction[:] = d.contact.solreffriction.numpy()[:ncon]
-  result.contact.solimp[:] = d.contact.solimp.numpy()[:ncon]
-  result.contact.dim[:] = d.contact.dim.numpy()[:ncon]
-  result.contact.efc_address[:] = d.contact.efc_address.numpy()[:ncon, 0]
-
-  if support.is_sparse(mjm):
-    result.qM[:] = d.qM.numpy()[0, 0]
-    result.qLD[:] = d.qLD.numpy()[0, 0]
-    # TODO(team): set efc_J after fix to _realloc_con_efc lands
-    # efc_J = d.efc_J.numpy()[0, :nefc]
-    # mujoco.mju_dense2sparse(
-    #   result.efc_J, efc_J, result.efc_J_rownnz, result.efc_J_rowadr, result.efc_J_colind
-    # )
-  else:
-    qM = d.qM.numpy()
-    adr = 0
-    for i in range(mjm.nv):
-      j = i
-      while j >= 0:
-        result.qM[adr] = qM[0, i, j]
-        j = mjm.dof_parentid[j]
-        adr += 1
-    mujoco.mj_factorM(mjm, result)
-    # TODO(team): set efc_J after fix to _realloc_con_efc lands
-    # if nefc > 0:
-    #   result.efc_J[:nefc * mjm.nv] = d.efc_J.numpy()[:nefc].flatten()
-  result.xfrc_applied[:] = d.xfrc_applied.numpy()[0]
-  result.eq_active[:] = d.eq_active.numpy()[0]
-
-  result.efc_D[:] = d.efc.D.numpy()[:nefc]
-  result.efc_pos[:] = d.efc.pos.numpy()[:nefc]
-  result.efc_aref[:] = d.efc.aref.numpy()[:nefc]
-  result.efc_force[:] = d.efc.force.numpy()[:nefc]
-  result.efc_margin[:] = d.efc.margin.numpy()[:nefc]
-
-  result.cacc[:] = d.cacc.numpy()[0]
-  result.cfrc_int[:] = d.cfrc_int.numpy()[0]
-  result.cfrc_ext[:] = d.cfrc_ext.numpy()[0]
-
-  # TODO: other efc_ fields, anything else missing
-
-  # sensors
-  result.sensordata[:] = d.sensordata.numpy()
+  pass

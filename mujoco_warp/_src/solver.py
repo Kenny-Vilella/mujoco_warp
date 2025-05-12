@@ -35,16 +35,15 @@ def _create_context(m: types.Model, d: types.Data, grad: bool = True):
 
   @kernel
   def _jaref(m: types.Model, d: types.Data):
-    efcid, dofid = wp.tid()
+    worldid, efcid, dofid = wp.tid()
 
-    if efcid >= d.nefc[0]:
+    if efcid >= d.nefc[worldid]:
       return
 
-    worldid = d.efc.worldid[efcid]
     wp.atomic_add(
-      d.efc.Jaref,
+      d.efc.Jaref[worldid],
       efcid,
-      d.efc.J[efcid, dofid] * d.qacc[worldid, dofid] - d.efc.aref[efcid] / float(m.nv),
+      d.efc.J[worldid, efcid, dofid] * d.qacc[worldid, dofid] - d.efc.aref[worldid, efcid] / float(m.nv),
     )
 
   @kernel
@@ -59,7 +58,7 @@ def _create_context(m: types.Model, d: types.Data, grad: bool = True):
   # jaref = d.efc_J @ d.qacc - d.efc_aref
   d.efc.Jaref.zero_()
 
-  wp.launch(_jaref, dim=(d.njmax, m.nv), inputs=[m, d])
+  wp.launch(_jaref, dim=(d.nworld, d.njmax, m.nv), inputs=[m, d])
 
   # Ma = qM @ qacc
   support.mul_m(m, d, d.efc.Ma, d.qacc, d.efc.done)
@@ -89,19 +88,17 @@ def _update_constraint(m: types.Model, d: types.Data):
 
   @kernel
   def _efc(d: types.Data):
-    efcid = wp.tid()
+    worldid, efcid = wp.tid()
 
-    if efcid >= d.nefc[0]:
+    if efcid >= d.nefc[worldid]:
       return
-
-    worldid = d.efc.worldid[efcid]
 
     if wp.static(m.opt.iterations) > 1:
       if d.efc.done[worldid]:
         return
 
-    Jaref = d.efc.Jaref[efcid]
-    efc_D = d.efc.D[efcid]
+    Jaref = d.efc.Jaref[worldid, efcid]
+    efc_D = d.efc.D[worldid, efcid]
 
     cost = 0.5 * efc_D * Jaref * Jaref
     efc_force = -efc_D * Jaref
@@ -114,28 +111,28 @@ def _update_constraint(m: types.Model, d: types.Data):
       pass
     elif efcid < ne + nf and wp.static(not DSBL_FLOSS):
       # friction
-      f = d.efc.frictionloss[efcid]
+      f = d.efc.frictionloss[worldid, efcid]
       if f > 0.0:
         rf = _safe_div(f, efc_D)
         if Jaref <= -rf:
-          d.efc.force[efcid] = f
-          d.efc.active[efcid] = False
+          d.efc.force[worldid, efcid] = f
+          d.efc.active[worldid, efcid] = False
           wp.atomic_add(d.efc.cost, worldid, -0.5 * rf - Jaref)
           return
         elif Jaref >= rf:
-          d.efc.force[efcid] = -f
-          d.efc.active[efcid] = False
+          d.efc.force[worldid, efcid] = -f
+          d.efc.active[worldid, efcid] = False
           wp.atomic_add(d.efc.cost, worldid, -0.5 * rf + Jaref)
           return
     else:
       # limit, contact
       if Jaref >= 0.0:
-        d.efc.force[efcid] = 0.0
-        d.efc.active[efcid] = False
+        d.efc.force[worldid, efcid] = 0.0
+        d.efc.active[worldid, efcid] = False
         return
 
-    d.efc.force[efcid] = efc_force
-    d.efc.active[efcid] = True
+    d.efc.force[worldid, efcid] = efc_force
+    d.efc.active[worldid, efcid] = True
     wp.atomic_add(d.efc.cost, worldid, cost)
 
   @kernel
@@ -150,12 +147,10 @@ def _update_constraint(m: types.Model, d: types.Data):
 
   @kernel
   def _qfrc_constraint(d: types.Data):
-    dofid, efcid = wp.tid()
+    worldid, dofid, efcid = wp.tid()
 
-    if efcid >= d.nefc[0]:
+    if efcid >= d.nefc[worldid]:
       return
-
-    worldid = d.efc.worldid[efcid]
 
     if wp.static(m.opt.iterations) > 1:
       if d.efc.done[worldid]:
@@ -164,7 +159,7 @@ def _update_constraint(m: types.Model, d: types.Data):
     wp.atomic_add(
       d.qfrc_constraint[worldid],
       dofid,
-      d.efc.J[efcid, dofid] * d.efc.force[efcid],
+      d.efc.J[worldid, efcid, dofid] * d.efc.force[worldid, efcid],
     )
 
   @kernel
@@ -185,12 +180,12 @@ def _update_constraint(m: types.Model, d: types.Data):
 
   wp.launch(_init_cost, dim=(d.nworld), inputs=[d])
 
-  wp.launch(_efc, dim=(d.njmax,), inputs=[d])
+  wp.launch(_efc, dim=(d.nworld, d.njmax,), inputs=[d])
 
   # qfrc_constraint = efc_J.T @ efc_force
   wp.launch(_zero_qfrc_constraint, dim=(d.nworld, m.nv), inputs=[d])
 
-  wp.launch(_qfrc_constraint, dim=(m.nv, d.njmax), inputs=[d])
+  wp.launch(_qfrc_constraint, dim=(d.nworld, m.nv, d.njmax), inputs=[d])
 
   # gauss = 0.5 * (Ma - qfrc_smooth).T @ (qacc - qacc_smooth)
 
@@ -270,58 +265,27 @@ def _update_gradient(m: types.Model, d: types.Data):
       colid = m.dof_tri_col[elementid]
       d.efc.h[worldid, rowid, colid] = d.qM[worldid, rowid, colid]
 
-  # Optimization: launching _JTDAJ with limited number of blocks on a GPU.
-  # Profiling suggests that only a fraction of blocks out of the original
-  # d.njmax blocks do the actual work. It aims to minimize #CTAs with no
-  # effective work. It launches with #blocks that's proportional to the number
-  # of SMs on the GPU. We can now query the SM count:
-  # https://github.com/NVIDIA/warp/commit/f3814e7e5459e5fd13032cf0fddb3daddd510f30
-
-  # make dim_x and nblocks_perblock static arguments for _JTDAJ to allow unrolling the loop
-  if wp.get_device().is_cuda:
-    sm_count = wp.get_device().sm_count
-
-    # Here we assume one block has 256 threads. We use a factor of 6, which
-    # can be change in future to fine-tune the perf. The optimal factor will
-    # depend on the kernel's occupancy, which determines how many blocks can
-    # simultaneously run on the SM. TODO: This factor can be tuned further.
-    dim_x = int((sm_count * 6 * 256) / m.dof_tri_row.size)
-  else:
-    dim_x = d.njmax  # fall back for CPU
-
-  nblocks_perblock = int((d.njmax + dim_x - 1) / dim_x)
 
   @kernel
   def _JTDAJ(m: types.Model, d: types.Data):
-    # TODO(team): static m?
-    efcid_temp, elementid = wp.tid()
-
-    nefc = d.nefc[0]
-
-    for i in range(nblocks_perblock):
-      efcid = efcid_temp + i * dim_x
-
-      if efcid >= nefc:
-        return
-
-      worldid = d.efc.worldid[efcid]
-
-    efc_D = d.efc.D[efcid]
-    active = d.efc.active[efcid]
-    if efc_D == 0.0 or not active:
-      return
-
-    efc_D = d.efc.D[efcid]
-    active = d.efc.active[efcid]
-
-    if efc_D * float(active) == 0.0:
-      return
+    worldid, elementid = wp.tid()
 
     dofi = m.dof_tri_row[elementid]
     dofj = m.dof_tri_col[elementid]
 
-    # TODO(team): sparse efc_J
-    value = d.efc.J[efcid, dofi] * d.efc.J[efcid, dofj] * efc_D
+    value = float(0.0)
+    for efcid in range(d.nefc[worldid]):
+      active = d.efc.active[worldid, efcid]
+      efc_D = d.efc.D[worldid, efcid]
+      efc_Ji = d.efc.J[worldid, efcid, dofi]
+      efc_Jj = d.efc.J[worldid, efcid, dofj]
+
+      if not active:
+        continue
+
+      # TODO(team): sparse efc_J
+      value += efc_Ji * efc_Jj * efc_D
+
     if value != 0.0:
       wp.atomic_add(d.efc.h[worldid, dofi], dofj, value)
 
@@ -359,7 +323,7 @@ def _update_gradient(m: types.Model, d: types.Data):
 
     wp.launch(
       _JTDAJ,
-      dim=(dim_x, m.dof_tri_row.size),
+      dim=(d.nworld, m.dof_tri_row.size),
       inputs=[m, d],
     )
 
@@ -419,23 +383,20 @@ def _linesearch_iterative(m: types.Model, d: types.Data):
 
   @kernel
   def _init_p0(p0: wp.array(dtype=wp.vec3), d: types.Data):
-    efcid = wp.tid()
+    worldid, efcid = wp.tid()
 
-    if efcid >= d.nefc[0]:
+    if efcid >= d.nefc[worldid]:
       return
-
-    worldid = d.efc.worldid[efcid]
 
     if wp.static(m.opt.iterations) > 1:
       if d.efc.done[worldid]:
         return
 
-    Jaref = d.efc.Jaref[efcid]
+    Jaref = d.efc.Jaref[worldid, efcid]
     if (Jaref >= 0.0) and (efcid >= d.ne[0] + d.nf[0]):
       return
 
-    quad = d.efc.quad[efcid]
-    jv = d.efc.jv[efcid]
+    quad = d.efc.quad[worldid, efcid]
 
     wp.atomic_add(p0, worldid, wp.vec3(quad[0], quad[1], 2.0 * quad[2]))
 
@@ -463,12 +424,10 @@ def _linesearch_iterative(m: types.Model, d: types.Data):
     lo_alpha: wp.array(dtype=wp.float32),
     d: types.Data,
   ):
-    efcid = wp.tid()
+    worldid, efcid = wp.tid()
 
-    if efcid >= d.nefc[0]:
+    if efcid >= d.nefc[worldid]:
       return
-
-    worldid = d.efc.worldid[efcid]
 
     if wp.static(m.opt.iterations) > 1:
       if d.efc.done[worldid]:
@@ -476,9 +435,9 @@ def _linesearch_iterative(m: types.Model, d: types.Data):
 
     alpha = lo_alpha[worldid]
 
-    quad = d.efc.quad[efcid]
-    Jaref = d.efc.Jaref[efcid]
-    jv = d.efc.jv[efcid]
+    quad = d.efc.quad[worldid, efcid]
+    Jaref = d.efc.Jaref[worldid, efcid]
+    jv = d.efc.jv[worldid, efcid]
 
     if (Jaref + alpha * jv < 0.0) or (efcid < d.ne[0] + d.nf[0]):
       wp.atomic_add(lo, worldid, _eval_pt(quad, alpha))
@@ -508,92 +467,7 @@ def _linesearch_iterative(m: types.Model, d: types.Data):
     hi_alpha[worldid] = wp.where(lo_less, 0.0, plo_alpha)
 
   @kernel
-  def _next_alpha_gauss(
-    done: wp.array(dtype=bool),
-    lo: wp.array(dtype=wp.vec3),
-    lo_alpha: wp.array(dtype=wp.float32),
-    hi: wp.array(dtype=wp.vec3),
-    hi_alpha: wp.array(dtype=wp.float32),
-    lo_next: wp.array(dtype=wp.vec3),
-    lo_next_alpha: wp.array(dtype=wp.float32),
-    hi_next: wp.array(dtype=wp.vec3),
-    hi_next_alpha: wp.array(dtype=wp.float32),
-    mid: wp.array(dtype=wp.vec3),
-    mid_alpha: wp.array(dtype=wp.float32),
-    d: types.Data,
-  ):
-    worldid = wp.tid()
-
-    if wp.static(m.opt.iterations) > 1:
-      if d.efc.done[worldid]:
-        return
-
-    if done[worldid]:
-      return
-
-    quad = d.efc.quad_gauss[worldid]
-
-    plo = lo[worldid]
-    plo_alpha = lo_alpha[worldid]
-    plo_next_alpha = plo_alpha - _safe_div(plo[1], plo[2])
-    lo_next[worldid] = _eval_pt(quad, plo_next_alpha)
-    lo_next_alpha[worldid] = plo_next_alpha
-
-    phi = hi[worldid]
-    phi_alpha = hi_alpha[worldid]
-    phi_next_alpha = phi_alpha - _safe_div(phi[1], phi[2])
-    hi_next[worldid] = _eval_pt(quad, phi_next_alpha)
-    hi_next_alpha[worldid] = phi_next_alpha
-
-    pmid_alpha = 0.5 * (plo_alpha + phi_alpha)
-    mid[worldid] = _eval_pt(quad, pmid_alpha)
-    mid_alpha[worldid] = pmid_alpha
-
-  @kernel
-  def _next_quad(
-    done: wp.array(dtype=bool),
-    lo_next: wp.array(dtype=wp.vec3),
-    lo_next_alpha: wp.array(dtype=wp.float32),
-    hi_next: wp.array(dtype=wp.vec3),
-    hi_next_alpha: wp.array(dtype=wp.float32),
-    mid: wp.array(dtype=wp.vec3),
-    mid_alpha: wp.array(dtype=wp.float32),
-    d: types.Data,
-  ):
-    efcid = wp.tid()
-
-    if efcid >= d.nefc[0]:
-      return
-
-    worldid = d.efc.worldid[efcid]
-
-    if wp.static(m.opt.iterations) > 1:
-      if d.efc.done[worldid]:
-        return
-
-    if done[worldid]:
-      return
-
-    quad = d.efc.quad[efcid]
-    jaref = d.efc.Jaref[efcid]
-    jv = d.efc.jv[efcid]
-
-    nef_active = efcid < d.ne[0] + d.nf[0]
-
-    alpha = lo_next_alpha[worldid]
-    if (jaref + alpha * jv < 0.0) or nef_active:
-      wp.atomic_add(lo_next, worldid, _eval_pt(quad, alpha))
-
-    alpha = hi_next_alpha[worldid]
-    if (jaref + alpha * jv < 0.0) or nef_active:
-      wp.atomic_add(hi_next, worldid, _eval_pt(quad, alpha))
-
-    alpha = mid_alpha[worldid]
-    if (jaref + alpha * jv < 0.0) or nef_active:
-      wp.atomic_add(mid, worldid, _eval_pt(quad, alpha))
-
-  @kernel
-  def _swap(
+  def _linesearch_terations(
     done: wp.array(dtype=bool),
     p0: wp.array(dtype=wp.vec3),
     lo: wp.array(dtype=wp.vec3),
@@ -608,71 +482,111 @@ def _linesearch_iterative(m: types.Model, d: types.Data):
     mid_alpha: wp.array(dtype=wp.float32),
     d: types.Data,
   ):
-    worldid = wp.tid()
+    worldid, efcid = wp.tid()
 
-    if wp.static(m.opt.iterations) > 1:
-      if d.efc.done[worldid]:
+    for i in range(m.opt.ls_iterations):
+      if i > 1:
+        if d.efc.done[worldid]:
+          return
+
+      if done[worldid]:
         return
 
-    if done[worldid]:
-      return
+      if efcid >= d.nefc[worldid]:
+        return
 
-    plo = lo[worldid]
-    plo_alpha = lo_alpha[worldid]
-    phi = hi[worldid]
-    phi_alpha = hi_alpha[worldid]
-    plo_next = lo_next[worldid]
-    plo_next_alpha = lo_next_alpha[worldid]
-    phi_next = hi_next[worldid]
-    phi_next_alpha = hi_next_alpha[worldid]
-    pmid = mid[worldid]
-    pmid_alpha = mid_alpha[worldid]
+      quad = d.efc.quad_gauss[worldid]
 
-    # swap lo:
-    swap_lo_lo_next = _in_bracket(plo, plo_next)
-    plo = wp.where(swap_lo_lo_next, plo_next, plo)
-    plo_alpha = wp.where(swap_lo_lo_next, plo_next_alpha, plo_alpha)
-    swap_lo_mid = _in_bracket(plo, pmid)
-    plo = wp.where(swap_lo_mid, pmid, plo)
-    plo_alpha = wp.where(swap_lo_mid, pmid_alpha, plo_alpha)
-    swap_lo_hi_next = _in_bracket(plo, phi_next)
-    plo = wp.where(swap_lo_hi_next, phi_next, plo)
-    plo_alpha = wp.where(swap_lo_hi_next, phi_next_alpha, plo_alpha)
-    lo[worldid] = plo
-    lo_alpha[worldid] = plo_alpha
-    swap_lo = swap_lo_lo_next or swap_lo_mid or swap_lo_hi_next
+      plo = lo[worldid]
+      plo_alpha = lo_alpha[worldid]
+      plo_next_alpha = plo_alpha - _safe_div(plo[1], plo[2])
+      lo_next[worldid] = _eval_pt(quad, plo_next_alpha)
+      lo_next_alpha[worldid] = plo_next_alpha
 
-    # swap hi:
-    swap_hi_hi_next = _in_bracket(phi, phi_next)
-    phi = wp.where(swap_hi_hi_next, phi_next, phi)
-    phi_alpha = wp.where(swap_hi_hi_next, phi_next_alpha, phi_alpha)
-    swap_hi_mid = _in_bracket(phi, pmid)
-    phi = wp.where(swap_hi_mid, pmid, phi)
-    phi_alpha = wp.where(swap_hi_mid, pmid_alpha, phi_alpha)
-    swap_hi_lo_next = _in_bracket(phi, plo_next)
-    phi = wp.where(swap_hi_lo_next, plo_next, phi)
-    phi_alpha = wp.where(swap_hi_lo_next, plo_next_alpha, phi_alpha)
-    hi[worldid] = phi
-    hi_alpha[worldid] = phi_alpha
-    swap_hi = swap_hi_hi_next or swap_hi_mid or swap_hi_lo_next
+      phi = hi[worldid]
+      phi_alpha = hi_alpha[worldid]
+      phi_next_alpha = phi_alpha - _safe_div(phi[1], phi[2])
+      hi_next[worldid] = _eval_pt(quad, phi_next_alpha)
+      hi_next_alpha[worldid] = phi_next_alpha
 
-    # if we did not adjust the interval, we are done
-    # also done if either low or hi slope is nearly flat
-    gtol = d.efc.gtol[worldid]
-    done[worldid] = (
-      (not swap_lo and not swap_hi)
-      or (plo[1] < 0 and plo[1] > -gtol)
-      or (phi[1] > 0 and phi[1] < gtol)
-    )
+      pmid_alpha = 0.5 * (plo_alpha + phi_alpha)
+      mid[worldid] = _eval_pt(quad, pmid_alpha)
+      mid_alpha[worldid] = pmid_alpha
 
-    # update alpha if we have an improvement
-    pp0 = p0[worldid]
-    alpha = 0.0
-    improved = plo[0] < pp0[0] or phi[0] < pp0[0]
-    plo_better = plo[0] < phi[0]
-    alpha = wp.where(improved and plo_better, plo_alpha, alpha)
-    alpha = wp.where(improved and not plo_better, phi_alpha, alpha)
-    d.efc.alpha[worldid] = alpha
+      quad = d.efc.quad[worldid, efcid]
+      jaref = d.efc.Jaref[worldid, efcid]
+      jv = d.efc.jv[worldid, efcid]
+      alpha_lo = lo_next_alpha[worldid]
+      alpha_hi = hi_next_alpha[worldid]
+      alpha_mid = mid_alpha[worldid]
+
+      nef_active = efcid < d.ne[0] + d.nf[0]
+
+      if (jaref + alpha_lo * jv < 0.0) or nef_active:
+        lo_next[worldid] += _eval_pt(quad, alpha_lo)
+
+      if (jaref + alpha_hi * jv < 0.0) or nef_active:
+        hi_next[worldid] += _eval_pt(quad, alpha_hi)
+
+      if (jaref + alpha_mid * jv < 0.0) or nef_active:
+        mid[worldid] += _eval_pt(quad, alpha_mid)
+
+      plo = lo[worldid]
+      plo_alpha = lo_alpha[worldid]
+      phi = hi[worldid]
+      phi_alpha = hi_alpha[worldid]
+      plo_next = lo_next[worldid]
+      plo_next_alpha = lo_next_alpha[worldid]
+      phi_next = hi_next[worldid]
+      phi_next_alpha = hi_next_alpha[worldid]
+      pmid = mid[worldid]
+      pmid_alpha = mid_alpha[worldid]
+
+      # swap lo:
+      swap_lo_lo_next = _in_bracket(plo, plo_next)
+      plo = wp.where(swap_lo_lo_next, plo_next, plo)
+      plo_alpha = wp.where(swap_lo_lo_next, plo_next_alpha, plo_alpha)
+      swap_lo_mid = _in_bracket(plo, pmid)
+      plo = wp.where(swap_lo_mid, pmid, plo)
+      plo_alpha = wp.where(swap_lo_mid, pmid_alpha, plo_alpha)
+      swap_lo_hi_next = _in_bracket(plo, phi_next)
+      plo = wp.where(swap_lo_hi_next, phi_next, plo)
+      plo_alpha = wp.where(swap_lo_hi_next, phi_next_alpha, plo_alpha)
+      lo[worldid] = plo
+      lo_alpha[worldid] = plo_alpha
+      swap_lo = swap_lo_lo_next or swap_lo_mid or swap_lo_hi_next
+
+      # swap hi:
+      swap_hi_hi_next = _in_bracket(phi, phi_next)
+      phi = wp.where(swap_hi_hi_next, phi_next, phi)
+      phi_alpha = wp.where(swap_hi_hi_next, phi_next_alpha, phi_alpha)
+      swap_hi_mid = _in_bracket(phi, pmid)
+      phi = wp.where(swap_hi_mid, pmid, phi)
+      phi_alpha = wp.where(swap_hi_mid, pmid_alpha, phi_alpha)
+      swap_hi_lo_next = _in_bracket(phi, plo_next)
+      phi = wp.where(swap_hi_lo_next, plo_next, phi)
+      phi_alpha = wp.where(swap_hi_lo_next, plo_next_alpha, phi_alpha)
+      hi[worldid] = phi
+      hi_alpha[worldid] = phi_alpha
+      swap_hi = swap_hi_hi_next or swap_hi_mid or swap_hi_lo_next
+
+      # if we did not adjust the interval, we are done
+      # also done if either low or hi slope is nearly flat
+      gtol = d.efc.gtol[worldid]
+      done[worldid] = (
+        (not swap_lo and not swap_hi)
+        or (plo[1] < 0 and plo[1] > -gtol)
+        or (phi[1] > 0 and phi[1] < gtol)
+      )
+
+      # update alpha if we have an improvement
+      pp0 = p0[worldid]
+      alpha = 0.0
+      improved = plo[0] < pp0[0] or phi[0] < pp0[0]
+      plo_better = plo[0] < phi[0]
+      alpha = wp.where(improved and plo_better, plo_alpha, alpha)
+      alpha = wp.where(improved and not plo_better, phi_alpha, alpha)
+      d.efc.alpha[worldid] = alpha
 
   wp.launch(_gtol, dim=(d.nworld,), inputs=[m, d])
 
@@ -695,31 +609,19 @@ def _linesearch_iterative(m: types.Model, d: types.Data):
 
   wp.launch(_init_p0_gauss, dim=(d.nworld,), inputs=[p0, d])
 
-  wp.launch(_init_p0, dim=(d.njmax,), inputs=[p0, d])
+  wp.launch(_init_p0, dim=(d.nworld, d.njmax,), inputs=[p0, d])
 
   wp.launch(_init_lo_gauss, dim=(d.nworld,), inputs=[p0, lo, lo_alpha, d])
 
-  wp.launch(_init_lo, dim=(d.njmax,), inputs=[lo, lo_alpha, d])
+  wp.launch(_init_lo, dim=(d.nworld, d.njmax,), inputs=[lo, lo_alpha, d])
 
   # set the lo/hi interval bounds
 
   wp.launch(_init_bounds, dim=(d.nworld,), inputs=[p0, lo, lo_alpha, hi, hi_alpha, d])
 
-  for _ in range(m.opt.ls_iterations):
-    # note: we always launch ls_iterations kernels, but the kernels may early exit if done is true
-    # this allows us to preserve cudagraph requirements (no dynamic kernel launching) at the expense
-    # of extra launches
-    inputs = [done, lo, lo_alpha, hi, hi_alpha, lo_next, lo_next_alpha, hi_next]
-    inputs += [hi_next_alpha, mid, mid_alpha, d]
-    wp.launch(_next_alpha_gauss, dim=(d.nworld,), inputs=inputs)
-
-    inputs = [done, lo_next, lo_next_alpha, hi_next, hi_next_alpha, mid, mid_alpha]
-    inputs += [d]
-    wp.launch(_next_quad, dim=(d.njmax,), inputs=inputs)
-
-    inputs = [done, p0, lo, lo_alpha, hi, hi_alpha, lo_next, lo_next_alpha, hi_next]
-    inputs += [hi_next_alpha, mid, mid_alpha, d]
-    wp.launch(_swap, dim=(d.nworld,), inputs=inputs)
+  inputs = [done, p0, lo, lo_alpha, hi, hi_alpha, lo_next, lo_next_alpha, hi_next]
+  inputs += [hi_next_alpha, mid, mid_alpha, d]
+  wp.launch(_linesearch_terations, dim=(d.nworld, d.njmax), inputs=inputs)
 
 
 def _linesearch_parallel(m: types.Model, d: types.Data):
@@ -739,20 +641,18 @@ def _linesearch_parallel(m: types.Model, d: types.Data):
   @kernel
   def _quad_total_candidate(m: types.Model, d: types.Data):
     # TODO(team): static m?
-    efcid, alphaid = wp.tid()
+    worldid, efcid, alphaid = wp.tid()
 
-    if efcid >= d.nefc[0]:
+    if efcid >= d.nefc[worldid]:
       return
-
-    worldid = d.efc.worldid[efcid]
 
     if ITERATIONS > 1:
       if d.efc.done[worldid]:
         return
 
-    Jaref = d.efc.Jaref[efcid]
-    jv = d.efc.jv[efcid]
-    quad = d.efc.quad[efcid]
+    Jaref = d.efc.Jaref[worldid, efcid]
+    jv = d.efc.jv[worldid, efcid]
+    quad = d.efc.quad[worldid, efcid]
 
     alpha = m.alpha_candidate[alphaid]
 
@@ -792,7 +692,7 @@ def _linesearch_parallel(m: types.Model, d: types.Data):
 
   wp.launch(_quad_total, dim=(d.nworld, m.nlsp), inputs=[m, d])
 
-  wp.launch(_quad_total_candidate, dim=(d.njmax, m.nlsp), inputs=[m, d])
+  wp.launch(_quad_total_candidate, dim=(d.nworld, d.njmax, m.nlsp), inputs=[m, d])
 
   wp.launch(_cost_alpha, dim=(d.nworld, m.nlsp), inputs=[m, d])
   wp.launch(_best_alpha, dim=(d.nworld), inputs=[d])
@@ -805,33 +705,31 @@ def _linesearch(m: types.Model, d: types.Data):
 
   @kernel
   def _zero_jv(d: types.Data):
-    efcid = wp.tid()
+    worldid, efcid = wp.tid()
 
-    if efcid >= d.nefc[0]:
+    if efcid >= d.nefc[worldid]:
       return
-
-    if wp.static(m.opt.iterations) > 1:
-      if d.efc.done[d.efc.worldid[efcid]]:
-        return
-
-    d.efc.jv[efcid] = 0.0
-
-  @kernel
-  def _jv(d: types.Data):
-    efcid, dofid = wp.tid()
-
-    if efcid >= d.nefc[0]:
-      return
-
-    worldid = d.efc.worldid[efcid]
 
     if wp.static(m.opt.iterations) > 1:
       if d.efc.done[worldid]:
         return
 
-    j = d.efc.J[efcid, dofid]
+    d.efc.jv[worldid, efcid] = 0.0
+
+  @kernel
+  def _jv(d: types.Data):
+    worldid, efcid, dofid = wp.tid()
+
+    if efcid >= d.nefc[worldid]:
+      return
+
+    if wp.static(m.opt.iterations) > 1:
+      if d.efc.done[worldid]:
+        return
+
+    j = d.efc.J[worldid, efcid, dofid]
     search = d.efc.search[worldid, dofid]
-    wp.atomic_add(d.efc.jv, efcid, j * search)
+    wp.atomic_add(d.efc.jv[worldid], efcid, j * search)
 
   @kernel
   def _zero_quad_gauss(d: types.Data):
@@ -861,32 +759,30 @@ def _linesearch(m: types.Model, d: types.Data):
 
   @kernel
   def _init_quad(d: types.Data):
-    efcid = wp.tid()
+    worldid, efcid = wp.tid()
 
-    if efcid >= d.nefc[0]:
+    if efcid >= d.nefc[worldid]:
       return
-
-    worldid = d.efc.worldid[efcid]
 
     if wp.static(m.opt.iterations) > 1:
       if d.efc.done[worldid]:
         return
 
-    Jaref = d.efc.Jaref[efcid]
-    jv = d.efc.jv[efcid]
-    efc_D = d.efc.D[efcid]
-    floss = d.efc.frictionloss[efcid]
+    Jaref = d.efc.Jaref[worldid, efcid]
+    jv = d.efc.jv[worldid, efcid]
+    efc_D = d.efc.D[worldid, efcid]
+    floss = d.efc.frictionloss[worldid, efcid]
 
     if floss > 0.0 and wp.static(not DSBL_FLOSS):
       rf = _safe_div(floss, efc_D)
       if Jaref <= -rf:
-        d.efc.quad[efcid] = wp.vec3(floss * (-0.5 * rf - Jaref), -floss * jv, 0.0)
+        d.efc.quad[worldid, efcid] = wp.vec3(floss * (-0.5 * rf - Jaref), -floss * jv, 0.0)
         return
       elif Jaref >= rf:
-        d.efc.quad[efcid] = wp.vec3(floss * (-0.5 * rf + Jaref), floss * jv, 0.0)
+        d.efc.quad[worldid, efcid] = wp.vec3(floss * (-0.5 * rf + Jaref), floss * jv, 0.0)
         return
 
-    d.efc.quad[efcid] = wp.vec3(
+    d.efc.quad[worldid, efcid] = wp.vec3(
       0.5 * Jaref * Jaref * efc_D, jv * Jaref * efc_D, 0.5 * jv * jv * efc_D
     )
 
@@ -899,32 +795,30 @@ def _linesearch(m: types.Model, d: types.Data):
         return
 
     alpha = d.efc.alpha[worldid]
-    d.qacc[worldid, dofid] += alpha * d.efc.search[worldid, dofid]
+    d.qacc[worldid, dofid] += alpha * d.efc.search[worldid, dofid]  # Why the fuck this causes issue???
     d.efc.Ma[worldid, dofid] += alpha * d.efc.mv[worldid, dofid]
 
   @kernel
   def _jaref(d: types.Data):
-    efcid = wp.tid()
+    worldid, efcid = wp.tid()
 
-    if efcid >= d.nefc[0]:
+    if efcid >= d.nefc[worldid]:
       return
-
-    worldid = d.efc.worldid[efcid]
 
     if wp.static(m.opt.iterations) > 1:
       if d.efc.done[worldid]:
         return
 
-    d.efc.Jaref[efcid] += d.efc.alpha[worldid] * d.efc.jv[efcid]
+    d.efc.Jaref[worldid, efcid] += d.efc.alpha[worldid] * d.efc.jv[worldid, efcid]
 
   # mv = qM @ search
   support.mul_m(m, d, d.efc.mv, d.efc.search, d.efc.done)
 
   # jv = efc_J @ search
   # TODO(team): is there a better way of doing batched matmuls with dynamic array sizes?
-  wp.launch(_zero_jv, dim=(d.njmax), inputs=[d])
+  wp.launch(_zero_jv, dim=(d.nworld, d.njmax), inputs=[d])
 
-  wp.launch(_jv, dim=(d.njmax, m.nv), inputs=[d])
+  wp.launch(_jv, dim=(d.nworld, d.njmax, m.nv), inputs=[d])
 
   # prepare quadratics
   # quad_gauss = [gauss, search.T @ Ma - search.T @ qfrc_smooth, 0.5 * search.T @ mv]
@@ -934,7 +828,7 @@ def _linesearch(m: types.Model, d: types.Data):
 
   # quad = [0.5 * Jaref * Jaref * efc_D, jv * Jaref * efc_D, 0.5 * jv * jv * efc_D]
 
-  wp.launch(_init_quad, dim=(d.njmax), inputs=[d])
+  wp.launch(_init_quad, dim=(d.nworld, d.njmax), inputs=[d])
 
   if m.opt.ls_parallel:
     _linesearch_parallel(m, d)
@@ -943,7 +837,7 @@ def _linesearch(m: types.Model, d: types.Data):
 
   wp.launch(_qacc_ma, dim=(d.nworld, m.nv), inputs=[d])
 
-  wp.launch(_jaref, dim=(d.njmax,), inputs=[d])
+  wp.launch(_jaref, dim=(d.nworld, d.njmax,), inputs=[d])
 
 
 @event_scope
@@ -1024,7 +918,7 @@ def solve(m: types.Model, d: types.Data):
         if d.efc.done[worldid]:
           return
 
-      prev_Mgrad = d.efc.prev_Mgrad[worldid][dofid]
+      prev_Mgrad = d.efc.prev_Mgrad[worldid, dofid]
       wp.atomic_add(
         d.efc.beta_num,
         worldid,
