@@ -429,7 +429,6 @@ class Constraint:
   """Constraint data.
 
   Attributes:
-    worldid: world id                                 (njmax,)
     id: id of object of specific type                 (njmax,)
     J: constraint Jacobian                            (njmax, nv)
     pos: constraint position (equality, contact)      (njmax,)
@@ -481,19 +480,18 @@ class Constraint:
     uu: elliptic cone variables                       (nconmax,)
     uv: elliptic cone variables                       (nconmax,)
     vv: elliptic cone variables                       (nconmax,)
-    condim: if contact: condim, else: -1              (njmax,)
+    condim: if contact: condim, else: -1              (nworld, njmax)
   """
 
-  worldid: wp.array(dtype=int)
-  id: wp.array(dtype=int)
-  J: wp.array2d(dtype=float)
-  pos: wp.array(dtype=float)
-  margin: wp.array(dtype=float)
-  D: wp.array(dtype=float)
-  aref: wp.array(dtype=float)
-  frictionloss: wp.array(dtype=float)
-  force: wp.array(dtype=float)
-  Jaref: wp.array(dtype=float)
+  id: wp.array2d(dtype=int)
+  J: wp.array3d(dtype=float)
+  pos: wp.array2d(dtype=float)
+  margin: wp.array2d(dtype=float)
+  D: wp.array2d(dtype=float)
+  aref: wp.array2d(dtype=float)
+  frictionloss: wp.array2d(dtype=float)
+  force: wp.array2d(dtype=float)
+  Jaref: wp.array2d(dtype=float)
   Ma: wp.array2d(dtype=float)
   grad: wp.array2d(dtype=float)
   grad_dot: wp.array(dtype=float)
@@ -504,11 +502,11 @@ class Constraint:
   cost: wp.array(dtype=float)
   prev_cost: wp.array(dtype=float)
   solver_niter: wp.array(dtype=int)
-  active: wp.array(dtype=bool)
+  active: wp.array2d(dtype=bool)
   gtol: wp.array(dtype=float)
   mv: wp.array2d(dtype=float)
-  jv: wp.array(dtype=float)
-  quad: wp.array(dtype=wp.vec3)
+  jv: wp.array2d(dtype=float)
+  quad: wp.array2d(dtype=wp.vec3)
   quad_gauss: wp.array(dtype=wp.vec3)
   h: wp.array3d(dtype=float)
   alpha: wp.array(dtype=float)
@@ -538,7 +536,7 @@ class Constraint:
   uu: wp.array(dtype=float)
   uv: wp.array(dtype=float)
   vv: wp.array(dtype=float)
-  condim: wp.array(dtype=int)
+  condim: wp.array2d(dtype=int)
 
 
 @dataclasses.dataclass

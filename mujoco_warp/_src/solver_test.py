@@ -122,7 +122,7 @@ class SolverTest(parameterized.TestCase):
       if m.opt.solver == mujoco.mjtSolver.mjSOL_NEWTON:
         _assert_eq(d.qacc.numpy()[0], mjd.qacc, "qacc")
         _assert_eq(d.qfrc_constraint.numpy()[0], mjd.qfrc_constraint, "qfrc_constraint")
-        _assert_eq(d.efc.force.numpy()[: mjd.nefc], mjd.efc_force, "efc_force")
+        _assert_eq(d.efc.force.numpy()[0, : mjd.nefc], mjd.efc_force, "efc_force")
 
   @parameterized.parameters(
     (ConeType.PYRAMIDAL, SolverType.CG, 25, 5),
@@ -390,7 +390,7 @@ class SolverTest(parameterized.TestCase):
     _assert_eq(d.nf.numpy()[0], mjd.nf, "nf")
     _assert_eq(d.qacc.numpy()[0], mjd.qacc, "qacc")
     _assert_eq(d.qfrc_constraint.numpy()[0], mjd.qfrc_constraint, "qfrc_constraint")
-    _assert_eq(d.efc.force.numpy()[: mjd.nefc], mjd.efc_force, "efc_force")
+    _assert_eq(d.efc.force.numpy()[0, : mjd.nefc], mjd.efc_force, "efc_force")
 
 
 if __name__ == "__main__":
