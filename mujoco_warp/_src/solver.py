@@ -1977,37 +1977,30 @@ def update_gradient_JTDAJ(
   efc_D_in: wp.array2d(dtype=float),
   efc_active_in: wp.array2d(dtype=bool),
   efc_done_in: wp.array(dtype=bool),
-  # In:
-  nblocks_perblock: int,
-  dim_x: int,
   # Data out:
   efc_h_out: wp.array3d(dtype=float),
 ):
   # TODO(team): static m?
-  worldid, efcid_temp, elementid = wp.tid()
+  worldid, elementid = wp.tid()
+
+  if efc_done_in[worldid]:
+    return
 
   nefc = nefc_in[worldid]
+  dofi = dof_tri_row[elementid]
+  dofj = dof_tri_col[elementid]
 
-  for i in range(nblocks_perblock):
-    efcid = efcid_temp + i * dim_x
-
-    if efcid >= nefc:
-      return
-
-    if efc_done_in[worldid]:
-      continue
-
+  for efcid in range(nefc):
     efc_D = efc_D_in[worldid, efcid]
     active = efc_active_in[worldid, efcid]
+    efc_Ji = efc_J_in[worldid, efcid, dofi]
+    efc_Jj = efc_J_in[worldid, efcid, dofj]
 
     if efc_D == 0.0 or not active:
-      continue
-
-    dofi = dof_tri_row[elementid]
-    dofj = dof_tri_col[elementid]
+      return
 
     # TODO(team): sparse efc_J
-    value = efc_J_in[worldid, efcid, dofi] * efc_J_in[worldid, efcid, dofj] * efc_D
+    value = efc_Ji * efc_Jj * efc_D
     if value != 0.0:
       wp.atomic_add(efc_h_out[worldid, dofi], dofj, value)
 
@@ -2209,7 +2202,7 @@ def _update_gradient(m: types.Model, d: types.Data):
 
     wp.launch(
       update_gradient_JTDAJ,
-      dim=(d.nworld, dim_x, m.dof_tri_row.size),
+      dim=(d.nworld, m.dof_tri_row.size),
       inputs=[
         m.dof_tri_row,
         m.dof_tri_col,
@@ -2218,8 +2211,6 @@ def _update_gradient(m: types.Model, d: types.Data):
         d.efc.D,
         d.efc.active,
         d.efc.done,
-        nblocks_perblock,
-        dim_x,
       ],
       outputs=[d.efc.h],
     )
