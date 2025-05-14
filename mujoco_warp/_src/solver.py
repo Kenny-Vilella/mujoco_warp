@@ -885,23 +885,7 @@ def _linesearch_iterative(m: types.Model, d: types.Data):
 
 
 @wp.kernel
-def linesearch_parallel_quad_total(
-  # Data in:
-  efc_quad_gauss_in: wp.array(dtype=wp.vec3),
-  efc_done_in: wp.array(dtype=bool),
-  # Data out:
-  efc_quad_total_candidate_out: wp.array2d(dtype=wp.vec3),
-):
-  worldid, alphaid = wp.tid()
-
-  if efc_done_in[worldid]:
-    return
-
-  efc_quad_total_candidate_out[worldid, alphaid] = efc_quad_gauss_in[worldid]
-
-
-@wp.kernel
-def linesearch_parallel_quad_total_candidate(
+def linesearch_parallel_whole(
   # Model:
   nlsp: int,
   # Data in:
@@ -911,9 +895,12 @@ def linesearch_parallel_quad_total_candidate(
   efc_Jaref_in: wp.array2d(dtype=float),
   efc_jv_in: wp.array2d(dtype=float),
   efc_quad_in: wp.array2d(dtype=wp.vec3),
+  efc_quad_gauss_in: wp.array(dtype=wp.vec3),
   efc_done_in: wp.array(dtype=bool),
   # Data out:
   efc_quad_total_candidate_out: wp.array2d(dtype=wp.vec3),
+  efc_cost_candidate_out: wp.array2d(dtype=float),
+  efc_alpha_out: wp.array(dtype=float),
 ):
   worldid, efcid, alphaid = wp.tid()
 
@@ -926,58 +913,29 @@ def linesearch_parallel_quad_total_candidate(
   Jaref = efc_Jaref_in[worldid, efcid]
   jv = efc_jv_in[worldid, efcid]
   quad = efc_quad_in[worldid, efcid]
+  ne = ne_in[worldid]
+  nf = nf_in[worldid]
+
+  efc_quad_total_candidate_out[worldid, alphaid] = efc_quad_gauss_in[worldid]
 
   alpha = float(alphaid) / float(nlsp - 1)
 
-  if (Jaref + alpha * jv) < 0.0 or (efcid < ne_in[worldid] + nf_in[worldid]):
+  if (Jaref + alpha * jv) < 0.0 or (efcid < ne + nf):
     wp.atomic_add(efc_quad_total_candidate_out, worldid, alphaid, quad)
 
-
-@wp.kernel
-def linesearch_parallel_cost_alpha(
-  # Model:
-  nlsp: int,
-  # Data in:
-  efc_done_in: wp.array(dtype=bool),
-  efc_quad_total_candidate_in: wp.array2d(dtype=wp.vec3),
-  # Data out:
-  efc_cost_candidate_out: wp.array2d(dtype=float),
-):
-  worldid, alphaid = wp.tid()
-
-  if efc_done_in[worldid]:
-    return
-
-  alpha = float(alphaid) / float(nlsp - 1)
   alpha_sq = alpha * alpha
-  quad_total0 = efc_quad_total_candidate_in[worldid, alphaid][0]
-  quad_total1 = efc_quad_total_candidate_in[worldid, alphaid][1]
-  quad_total2 = efc_quad_total_candidate_in[worldid, alphaid][2]
+  quad_total0 = efc_quad_total_candidate_out[worldid, alphaid][0]
+  quad_total1 = efc_quad_total_candidate_out[worldid, alphaid][1]
+  quad_total2 = efc_quad_total_candidate_out[worldid, alphaid][2]
 
   efc_cost_candidate_out[worldid, alphaid] = alpha_sq * quad_total2 + alpha * quad_total1 + quad_total0
-
-
-@wp.kernel
-def linesearch_parallel_best_alpha(
-  # Model:
-  nlsp: int,
-  # Data in:
-  efc_done_in: wp.array(dtype=bool),
-  efc_cost_candidate_in: wp.array2d(dtype=float),
-  # Data out:
-  efc_alpha_out: wp.array(dtype=float),
-):
-  worldid = wp.tid()
-
-  if efc_done_in[worldid]:
-    return
 
   # TODO(team): investigate alternatives to wp.argmin
   # TODO(thowell): how did this use to work?
   bestid = int(0)
   best_cost = float(wp.inf)
   for i in range(nlsp):
-    cost = efc_cost_candidate_in[worldid, i]
+    cost = efc_cost_candidate_out[worldid, i]
     if cost < best_cost:
       best_cost = cost
       bestid = i
@@ -987,13 +945,7 @@ def linesearch_parallel_best_alpha(
 
 def _linesearch_parallel(m: types.Model, d: types.Data):
   wp.launch(
-    linesearch_parallel_quad_total,
-    dim=(d.nworld, m.nlsp),
-    inputs=[d.efc.quad_gauss, d.efc.done],
-    outputs=[d.efc.quad_total_candidate],
-  )
-  wp.launch(
-    linesearch_parallel_quad_total_candidate,
+    linesearch_parallel_whole,
     dim=(d.nworld, d.njmax, m.nlsp),
     inputs=[
       m.nlsp,
@@ -1003,21 +955,10 @@ def _linesearch_parallel(m: types.Model, d: types.Data):
       d.efc.Jaref,
       d.efc.jv,
       d.efc.quad,
+      d.efc.quad_gauss,
       d.efc.done,
     ],
-    outputs=[d.efc.quad_total_candidate],
-  )
-  wp.launch(
-    linesearch_parallel_cost_alpha,
-    dim=(d.nworld, m.nlsp),
-    inputs=[m.nlsp, d.efc.done, d.efc.quad_total_candidate],
-    outputs=[d.efc.cost_candidate],
-  )
-  wp.launch(
-    linesearch_parallel_best_alpha,
-    dim=(d.nworld),
-    inputs=[m.nlsp, d.efc.done, d.efc.cost_candidate],
-    outputs=[d.efc.alpha],
+    outputs=[d.efc.quad_total_candidate, d.efc.cost_candidate, d.efc.alpha],
   )
 
 
