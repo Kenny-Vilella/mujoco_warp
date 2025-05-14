@@ -162,9 +162,8 @@ def linesearch_iterative_init_p0_elliptic0(
 
   active = efc_Jaref_in[worldid, efcid] < 0.0
 
-  nef = ne_in[0] + nf_in[0]
-  nefl = nef + nl_in[0]
-  # TODO: KV This should be changed
+  nef = ne_in[worldid] + nf_in[worldid]
+  nefl = nef + nl_in[worldid]
   if efcid < nef:
     active = True
   elif efcid >= nefl and efc_condim_in[worldid, efcid] > 1:
@@ -246,8 +245,7 @@ def linesearch_iterative_init_p0_pyramidal(
   if efc_done_in[worldid]:
     return
 
-  # TODO: KV This should be changed
-  if efc_Jaref_in[worldid, efcid] >= 0.0 and efcid >= ne_in[0] + nf_in[0]:
+  if efc_Jaref_in[worldid, efcid] >= 0.0 and efcid >= ne_in[worldid] + nf_in[worldid]:
     return
 
   quad = efc_quad_in[worldid, efcid]
@@ -304,9 +302,8 @@ def linesearch_iterative_init_lo_elliptic0(
 
   active = efc_Jaref_in[worldid, efcid] + alpha * efc_jv_in[worldid, efcid] < 0.0
 
-  # TODO: KV This should be changed
-  nef = ne_in[0] + nf_in[0]
-  nefl = nef + nl_in[0]
+  nef = ne_in[worldid] + nf_in[worldid]
+  nefl = nef + nl_in[worldid]
   if efcid < nef:
     active = True
   elif efcid >= nefl and efc_condim_in[worldid, efcid] > 1:
@@ -391,8 +388,7 @@ def linesearch_iterative_init_lo_pyramidal(
 
   alpha = efc_lo_alpha_in[worldid]
 
-  # TODO: KV This should be changed
-  if efc_Jaref_in[worldid, efcid] + alpha * efc_jv_in[worldid, efcid] < 0.0 or (efcid < ne_in[0] + nf_in[0]):
+  if efc_Jaref_in[worldid, efcid] + alpha * efc_jv_in[worldid, efcid] < 0.0 or (efcid < ne_in[worldid] + nf_in[worldid]):
     wp.atomic_add(efc_lo_out, worldid, _eval_pt(efc_quad_in[worldid, efcid], alpha))
 
 
@@ -502,8 +498,8 @@ def linesearch_iterative_next_quad_elliptic0(
   if efc_ls_done_in[worldid]:
     return
 
-  nef = ne_in[0] + nf_in[0]
-  nefl = nef + nl_in[0]
+  nef = ne_in[worldid] + nf_in[worldid]
+  nefl = nef + nl_in[worldid]
 
   quad = efc_quad_in[worldid, efcid]
   jaref = efc_Jaref_in[worldid, efcid]
@@ -511,7 +507,6 @@ def linesearch_iterative_next_quad_elliptic0(
 
   alpha = efc_lo_next_alpha_in[worldid]
 
-  # TODO: KV This should be changed
   active = jaref + alpha * jv < 0.0
   if efcid < nef:
     active = True
@@ -523,7 +518,6 @@ def linesearch_iterative_next_quad_elliptic0(
 
   alpha = efc_hi_next_alpha_in[worldid]
 
-  # TODO: KV This should be changed
   active = jaref + alpha * jv < 0.0
   if efcid < nef:
     active = True
@@ -535,7 +529,6 @@ def linesearch_iterative_next_quad_elliptic0(
 
   alpha = efc_mid_alpha_in[worldid]
 
-  # TODO: KV This should be changed
   active = jaref + alpha * jv < 0.0
   if efcid < nef:
     active = True
@@ -639,8 +632,7 @@ def linesearch_iterative_next_quad_pyramidal(
   if efc_ls_done_in[worldid]:
     return
 
-  # TODO: KV This should be changed
-  nef_active = efcid < ne_in[0] + nf_in[0]
+  nef_active = efcid < ne_in[worldid] + nf_in[worldid]
 
   quad = efc_quad_in[worldid, efcid]
   jaref = efc_Jaref_in[worldid, efcid]
@@ -937,8 +929,7 @@ def linesearch_parallel_quad_total_candidate(
 
   alpha = float(alphaid) / float(nlsp - 1)
 
-  # TODO: KV This should be changed
-  if (Jaref + alpha * jv) < 0.0 or (efcid < ne_in[0] + nf_in[0]):
+  if (Jaref + alpha * jv) < 0.0 or (efcid < ne_in[worldid] + nf_in[worldid]):
     wp.atomic_add(efc_quad_total_candidate_out, worldid, alphaid, quad)
 
 
@@ -1431,10 +1422,9 @@ def update_constraint_efc_pyramidal(
   cost = 0.5 * efc_D * Jaref * Jaref
   efc_force = -efc_D * Jaref
 
-  ne = ne_in[0]
-  nf = nf_in[0]
+  ne = ne_in[worldid]
+  nf = nf_in[worldid]
 
-  # TODO: KV This should be changed
   if efcid < ne:
     # equality
     pass
@@ -1585,11 +1575,10 @@ def update_constraint_efc_elliptic0(
   efc_D = efc_D_in[worldid, efcid]
   Jaref = efc_Jaref_in[worldid, efcid]
 
-  ne = ne_in[0]
-  nf = nf_in[0]
-  nl = nl_in[0]
+  ne = ne_in[worldid]
+  nf = nf_in[worldid]
+  nl = nl_in[worldid]
 
-  # TODO: KV This should be changed
   if efcid < ne:
     # equality
     efc_active_out[worldid, efcid] = True
