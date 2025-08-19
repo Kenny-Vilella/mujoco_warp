@@ -1086,7 +1086,7 @@ class Model:
   M_colind: wp.array(dtype=int)
   mapM2M: wp.array(dtype=int)
   qM_tiles: tuple[TileSet, ...]
-  body_tree: tuple[wp.array(dtype=int), ...]
+  body_tree: wp.array(dtype=int)
   body_parentid: wp.array(dtype=int)
   body_rootid: wp.array(dtype=int)
   body_weldid: wp.array(dtype=int)

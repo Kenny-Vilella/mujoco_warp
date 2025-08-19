@@ -172,7 +172,7 @@ def put_model(mjm: mujoco.MjModel) -> types.Model:
   for i in range(mjm.nbody):
     body_depth[i] = body_depth[mjm.body_parentid[i]] + 1
     bodies.setdefault(body_depth[i], []).append(i)
-  body_tree = tuple(wp.array(bodies[i], dtype=int) for i in sorted(bodies))
+  body_tree = wp.array([j for i in list(bodies[i] for i in sorted(bodies)) for j in i], dtype=int)
 
   # qLD_updates has dof tree ordering of qLD updates for sparse factor m
   qLD_updates, dof_depth = {}, np.zeros(mjm.nv, dtype=int) - 1
