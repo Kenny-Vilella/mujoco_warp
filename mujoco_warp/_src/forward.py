@@ -77,52 +77,49 @@ def _next_position(
   jnttype = jnt_type[jntid]
   qpos_adr = jnt_qposadr[jntid]
   dof_adr = jnt_dofadr[jntid]
-  qpos = qpos_in[worldid]
-  qpos_next = qpos_out[worldid]
-  qvel = qvel_in[worldid]
 
   if jnttype == wp.static(JointType.FREE.value):
-    qpos_pos = wp.vec3(qpos[qpos_adr], qpos[qpos_adr + 1], qpos[qpos_adr + 2])
-    qvel_lin = wp.vec3(qvel[dof_adr], qvel[dof_adr + 1], qvel[dof_adr + 2]) * qvel_scale_in
+    qpos_pos = wp.vec3(qpos_in[worldid, qpos_adr], qpos_in[worldid, qpos_adr + 1], qpos_in[worldid, qpos_adr + 2])
+    qvel_lin = wp.vec3(qvel_in[worldid, dof_adr], qvel_in[worldid, dof_adr + 1], qvel_in[worldid, dof_adr + 2]) * qvel_scale_in
 
     qpos_new = qpos_pos + timestep * qvel_lin
 
     qpos_quat = wp.quat(
-      qpos[qpos_adr + 3],
-      qpos[qpos_adr + 4],
-      qpos[qpos_adr + 5],
-      qpos[qpos_adr + 6],
+      qpos_in[worldid, qpos_adr + 3],
+      qpos_in[worldid, qpos_adr + 4],
+      qpos_in[worldid, qpos_adr + 5],
+      qpos_in[worldid, qpos_adr + 6],
     )
-    qvel_ang = wp.vec3(qvel[dof_adr + 3], qvel[dof_adr + 4], qvel[dof_adr + 5]) * qvel_scale_in
+    qvel_ang = wp.vec3(qvel_in[worldid, dof_adr + 3], qvel_in[worldid, dof_adr + 4], qvel_in[worldid, dof_adr + 5]) * qvel_scale_in
 
     qpos_quat_new = math.quat_integrate(qpos_quat, qvel_ang, timestep)
 
-    qpos_next[qpos_adr + 0] = qpos_new[0]
-    qpos_next[qpos_adr + 1] = qpos_new[1]
-    qpos_next[qpos_adr + 2] = qpos_new[2]
-    qpos_next[qpos_adr + 3] = qpos_quat_new[0]
-    qpos_next[qpos_adr + 4] = qpos_quat_new[1]
-    qpos_next[qpos_adr + 5] = qpos_quat_new[2]
-    qpos_next[qpos_adr + 6] = qpos_quat_new[3]
+    qpos_out[worldid, qpos_adr + 0] = qpos_new[0]
+    qpos_out[worldid, qpos_adr + 1] = qpos_new[1]
+    qpos_out[worldid, qpos_adr + 2] = qpos_new[2]
+    qpos_out[worldid, qpos_adr + 3] = qpos_quat_new[0]
+    qpos_out[worldid, qpos_adr + 4] = qpos_quat_new[1]
+    qpos_out[worldid, qpos_adr + 5] = qpos_quat_new[2]
+    qpos_out[worldid, qpos_adr + 6] = qpos_quat_new[3]
 
   elif jnttype == wp.static(JointType.BALL.value):
     qpos_quat = wp.quat(
-      qpos[qpos_adr + 0],
-      qpos[qpos_adr + 1],
-      qpos[qpos_adr + 2],
-      qpos[qpos_adr + 3],
+      qpos_in[worldid, qpos_adr + 0],
+      qpos_in[worldid, qpos_adr + 1],
+      qpos_in[worldid, qpos_adr + 2],
+      qpos_in[worldid, qpos_adr + 3],
     )
-    qvel_ang = wp.vec3(qvel[dof_adr], qvel[dof_adr + 1], qvel[dof_adr + 2]) * qvel_scale_in
+    qvel_ang = wp.vec3(qvel_in[worldid, dof_adr], qvel_in[worldid, dof_adr + 1], qvel_in[worldid, dof_adr + 2]) * qvel_scale_in
 
     qpos_quat_new = math.quat_integrate(qpos_quat, qvel_ang, timestep)
 
-    qpos_next[qpos_adr + 0] = qpos_quat_new[0]
-    qpos_next[qpos_adr + 1] = qpos_quat_new[1]
-    qpos_next[qpos_adr + 2] = qpos_quat_new[2]
-    qpos_next[qpos_adr + 3] = qpos_quat_new[3]
+    qpos_out[worldid, qpos_adr + 0] = qpos_quat_new[0]
+    qpos_out[worldid, qpos_adr + 1] = qpos_quat_new[1]
+    qpos_out[worldid, qpos_adr + 2] = qpos_quat_new[2]
+    qpos_out[worldid, qpos_adr + 3] = qpos_quat_new[3]
 
   else:  # if jnt_type in (JointType.HINGE, JointType.SLIDE):
-    qpos_next[qpos_adr] = qpos[qpos_adr] + timestep * qvel[dof_adr] * qvel_scale_in
+    qpos_out[worldid, qpos_adr] = qpos_in[worldid, qpos_adr] + timestep * qvel_in[worldid, dof_adr] * qvel_scale_in
 
 
 @wp.kernel
