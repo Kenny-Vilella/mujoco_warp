@@ -844,7 +844,8 @@ def _qfrc_actuator(m: Model, d: Data):
 
     qfrc_actuator_out[worldid, dofid] = qfrc
 
-  wp.launch_tiled(
+
+  wp.launch(
     qfrc_actuator,
     dim=(d.nworld, m.nv),
     inputs=[
@@ -858,8 +859,23 @@ def _qfrc_actuator(m: Model, d: Data):
       d.actuator_force,
     ],
     outputs=[d.qfrc_actuator],
-    block_dim=m.block_dim.qfrc_actuator,
   )
+  # wp.launch_tiled(
+  #   qfrc_actuator,
+  #   dim=(d.nworld, m.nv),
+  #   inputs=[
+  #     m.ngravcomp,
+  #     m.jnt_actfrclimited,
+  #     m.jnt_actfrcrange,
+  #     m.jnt_actgravcomp,
+  #     m.dof_jntid,
+  #     d.actuator_moment,
+  #     d.qfrc_gravcomp,
+  #     d.actuator_force,
+  #   ],
+  #   outputs=[d.qfrc_actuator],
+  #   block_dim=m.block_dim.qfrc_actuator,
+  # )
 
 
 @event_scope
