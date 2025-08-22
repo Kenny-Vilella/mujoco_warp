@@ -312,6 +312,8 @@ def _advance(m: Model, d: Data, qacc: wp.array, qvel: Optional[wp.array] = None)
     ],
   )
 
+  wp.copy(d.qacc_warmstart, d.qacc)
+
 
 @wp.kernel
 def _euler_damp_qfrc_sparse(

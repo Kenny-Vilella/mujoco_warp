@@ -396,13 +396,12 @@ def put_model(mjm: mujoco.MjModel) -> types.Model:
   # contact sensor
   sensor_adr_to_contact_adr = np.clip(np.cumsum(mjm.sensor_type == mujoco.mjtSensor.mjSENS_CONTACT) - 1, a_min=0, a_max=None)
 
-  # TODO(team): improve heuristic for selecting broadphase routine
-  if mjm.ngeom > 1000:
-    broadphase = types.BroadphaseType.SAP_SEGMENTED
-  elif mjm.ngeom > 100:
+  if nxn_geom_pair_filtered.shape[0] < 250_000:
+    broadphase = types.BroadphaseType.NXN
+  elif mjm.ngeom < 1000:
     broadphase = types.BroadphaseType.SAP_TILE
   else:
-    broadphase = types.BroadphaseType.NXN
+    broadphase = types.BroadphaseType.SAP_SEGMENTED
 
   condim = np.concatenate((mjm.geom_condim, mjm.pair_dim))
   condim_max = np.max(condim) if len(condim) > 0 else 0
@@ -1016,7 +1015,6 @@ def make_data(mjm: mujoco.MjModel, nworld: int = 1, nconmax: int = -1, njmax: in
       cost=wp.zeros((nworld,), dtype=float),
       prev_cost=wp.zeros((nworld,), dtype=float),
       state=wp.zeros((nworld, njmax), dtype=int),
-      gtol=wp.zeros((nworld,), dtype=float),
       mv=wp.zeros((nworld, mjm.nv), dtype=float),
       jv=wp.zeros((nworld, njmax), dtype=float),
       quad=wp.zeros((nworld, njmax), dtype=wp.vec3f),
@@ -1028,18 +1026,6 @@ def make_data(mjm: mujoco.MjModel, nworld: int = 1, nconmax: int = -1, njmax: in
       beta=wp.zeros((nworld,), dtype=float),
       done=wp.zeros((nworld,), dtype=bool),
       # linesearch
-      ls_done=wp.zeros((nworld,), dtype=bool),
-      p0=wp.zeros((nworld,), dtype=wp.vec3),
-      lo=wp.zeros((nworld,), dtype=wp.vec3),
-      lo_alpha=wp.zeros((nworld,), dtype=float),
-      hi=wp.zeros((nworld,), dtype=wp.vec3),
-      hi_alpha=wp.zeros((nworld,), dtype=float),
-      lo_next=wp.zeros((nworld,), dtype=wp.vec3),
-      lo_next_alpha=wp.zeros((nworld,), dtype=float),
-      hi_next=wp.zeros((nworld,), dtype=wp.vec3),
-      hi_next_alpha=wp.zeros((nworld,), dtype=float),
-      mid=wp.zeros((nworld,), dtype=wp.vec3),
-      mid_alpha=wp.zeros((nworld,), dtype=float),
       cost_candidate=wp.zeros((nworld, mjm.opt.ls_iterations), dtype=float),
     ),
     # RK4
@@ -1395,7 +1381,6 @@ def put_data(
       cost=wp.empty(shape=(nworld,), dtype=float),
       prev_cost=wp.empty(shape=(nworld,), dtype=float),
       state=wp.empty(shape=(nworld, njmax), dtype=int),
-      gtol=wp.empty(shape=(nworld,), dtype=float),
       mv=wp.empty(shape=(nworld, mjm.nv), dtype=float),
       jv=wp.empty(shape=(nworld, njmax), dtype=float),
       quad=wp.empty(shape=(nworld, njmax), dtype=wp.vec3f),
@@ -1406,18 +1391,6 @@ def put_data(
       prev_Mgrad=wp.empty(shape=(nworld, mjm.nv), dtype=float),
       beta=wp.empty(shape=(nworld,), dtype=float),
       done=wp.empty(shape=(nworld,), dtype=bool),
-      ls_done=wp.zeros(shape=(nworld,), dtype=bool),
-      p0=wp.empty(shape=(nworld,), dtype=wp.vec3),
-      lo=wp.empty(shape=(nworld,), dtype=wp.vec3),
-      lo_alpha=wp.empty(shape=(nworld,), dtype=float),
-      hi=wp.empty(shape=(nworld,), dtype=wp.vec3),
-      hi_alpha=wp.empty(shape=(nworld,), dtype=float),
-      lo_next=wp.empty(shape=(nworld,), dtype=wp.vec3),
-      lo_next_alpha=wp.empty(shape=(nworld,), dtype=float),
-      hi_next=wp.empty(shape=(nworld,), dtype=wp.vec3),
-      hi_next_alpha=wp.empty(shape=(nworld,), dtype=float),
-      mid=wp.empty(shape=(nworld,), dtype=wp.vec3),
-      mid_alpha=wp.empty(shape=(nworld,), dtype=float),
       cost_candidate=wp.empty(shape=(nworld, mjm.opt.ls_iterations), dtype=float),
     ),
     # TODO(team): skip allocation if integrator != RK4
