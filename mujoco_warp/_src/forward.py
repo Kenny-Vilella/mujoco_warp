@@ -819,12 +819,18 @@ def _qfrc_actuator(m: Model, d: Data):
   ):
     worldid, dofid = wp.tid()
 
-    actuator_moment_tile = wp.tile_load(actuator_moment_in[worldid], shape=(NU, 1), offset=(0, dofid))
-    actuator_moment_tile = wp.tile_squeeze(actuator_moment_tile, axis=(1,))
-    actuator_force_tile = wp.tile_load(actuator_force_in[worldid], shape=NU)
-    actuator_moment_force_tile = wp.tile_map(wp.mul, actuator_moment_tile, actuator_force_tile)
-    qfrc_tile = wp.tile_reduce(wp.add, actuator_moment_force_tile)
-    qfrc = qfrc_tile[0]
+    qfrc = float(0.0)
+    for uid in range(NU):
+        actuator_moment_val = actuator_moment_in[worldid, uid, dofid]
+        actuator_force_val = actuator_force_in[worldid, uid]
+        qfrc += actuator_moment_val * actuator_force_val
+
+    # actuator_moment_tile = wp.tile_load(actuator_moment_in[worldid], shape=(NU, 1), offset=(0, dofid))
+    # actuator_moment_tile = wp.tile_squeeze(actuator_moment_tile, axis=(1,))
+    # actuator_force_tile = wp.tile_load(actuator_force_in[worldid], shape=NU)
+    # actuator_moment_force_tile = wp.tile_map(wp.mul, actuator_moment_tile, actuator_force_tile)
+    # qfrc_tile = wp.tile_reduce(wp.add, actuator_moment_force_tile)
+    # qfrc = qfrc_tile[0]
 
     jntid = dof_jntid[dofid]
 
