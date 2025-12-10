@@ -1176,14 +1176,77 @@ def _cacc(
   cacc_out[worldid, bodyid] = local_cacc
 
 
+@wp.kernel
+def _cacc_branch(
+  # Model:
+  body_parentid: wp.array(dtype=int),
+  body_dofnum: wp.array(dtype=int),
+  body_dofadr: wp.array(dtype=int),
+  # Data in:
+  qvel_in: wp.array2d(dtype=float),
+  qacc_in: wp.array2d(dtype=float),
+  cdof_in: wp.array2d(dtype=wp.spatial_vector),
+  cdof_dot_in: wp.array2d(dtype=wp.spatial_vector),
+  cacc_in: wp.array2d(dtype=wp.spatial_vector),
+  # Branch data:
+  branch_bodies: wp.array(dtype=int),
+  branch_start: wp.array(dtype=int),
+  branch_length: wp.array(dtype=int),
+  flg_acc: bool,
+  # Data out:
+  cacc_out: wp.array2d(dtype=wp.spatial_vector),
+):
+  """Process cacc for all bodies in a branch sequentially (root to leaf order)."""
+  worldid, branchid = wp.tid()
+
+  start = branch_start[branchid]
+  length = branch_length[branchid]
+
+  # Process each body in the branch sequentially
+  for i in range(length):
+    bodyid = branch_bodies[start + i]
+    dofnum = body_dofnum[bodyid]
+    pid = body_parentid[bodyid]
+    dofadr = body_dofadr[bodyid]
+    local_cacc = cacc_in[worldid, pid]
+    for j in range(dofnum):
+      local_cacc += cdof_dot_in[worldid, dofadr + j] * qvel_in[worldid, dofadr + j]
+      if flg_acc:
+        local_cacc += cdof_in[worldid, dofadr + j] * qacc_in[worldid, dofadr + j]
+    cacc_out[worldid, bodyid] = local_cacc
+
+
 def _rne_cacc_forward(m: Model, d: Data, flg_acc: bool = False):
-  for body_tree in m.body_tree:
+  if m.use_branch_traversal and m.num_branches > 0:
+    # Branch-based traversal: single kernel launch, each thread processes one branch
     wp.launch(
-      _cacc,
-      dim=(d.nworld, body_tree.size),
-      inputs=[m.body_parentid, m.body_dofnum, m.body_dofadr, d.qvel, d.qacc, d.cdof, d.cdof_dot, d.cacc, body_tree, flg_acc],
+      _cacc_branch,
+      dim=(d.nworld, m.num_branches),
+      inputs=[
+        m.body_parentid,
+        m.body_dofnum,
+        m.body_dofadr,
+        d.qvel,
+        d.qacc,
+        d.cdof,
+        d.cdof_dot,
+        d.cacc,
+        m.branch_bodies,
+        m.branch_start,
+        m.branch_length,
+        flg_acc,
+      ],
       outputs=[d.cacc],
     )
+  else:
+    # Depth-level traversal: one kernel launch per tree level
+    for body_tree in m.body_tree:
+      wp.launch(
+        _cacc,
+        dim=(d.nworld, body_tree.size),
+        inputs=[m.body_parentid, m.body_dofnum, m.body_dofadr, d.qvel, d.qacc, d.cdof, d.cdof_dot, d.cacc, body_tree, flg_acc],
+        outputs=[d.cacc],
+      )
 
 
 @wp.kernel
@@ -1890,6 +1953,85 @@ def _comvel_level(
   cvel_out[worldid, bodyid] = cvel
 
 
+@wp.kernel
+def _comvel_branch(
+  # Model:
+  body_parentid: wp.array(dtype=int),
+  body_jntnum: wp.array(dtype=int),
+  body_jntadr: wp.array(dtype=int),
+  body_dofadr: wp.array(dtype=int),
+  jnt_type: wp.array(dtype=int),
+  # Data in:
+  qvel_in: wp.array2d(dtype=float),
+  cdof_in: wp.array2d(dtype=wp.spatial_vector),
+  cvel_in: wp.array2d(dtype=wp.spatial_vector),
+  # Branch data:
+  branch_bodies: wp.array(dtype=int),
+  branch_start: wp.array(dtype=int),
+  branch_length: wp.array(dtype=int),
+  # Data out:
+  cvel_out: wp.array2d(dtype=wp.spatial_vector),
+  cdof_dot_out: wp.array2d(dtype=wp.spatial_vector),
+):
+  """Process comvel for all bodies in a branch sequentially (root to leaf order)."""
+  worldid, branchid = wp.tid()
+
+  start = branch_start[branchid]
+  length = branch_length[branchid]
+
+  qvel = qvel_in[worldid]
+  cdof = cdof_in[worldid]
+
+  # Process each body in the branch sequentially
+  for i in range(length):
+    bodyid = branch_bodies[start + i]
+    dofid = body_dofadr[bodyid]
+    jntid = body_jntadr[bodyid]
+    jntnum = body_jntnum[bodyid]
+    pid = body_parentid[bodyid]
+
+    if jntnum == 0:
+      cvel_out[worldid, bodyid] = cvel_in[worldid, pid]
+      continue
+
+    cvel = cvel_in[worldid, pid]
+
+    for j in range(jntid, jntid + jntnum):
+      jnttype = jnt_type[j]
+
+      if jnttype == JointType.FREE:
+        cvel += cdof[dofid + 0] * qvel[dofid + 0]
+        cvel += cdof[dofid + 1] * qvel[dofid + 1]
+        cvel += cdof[dofid + 2] * qvel[dofid + 2]
+
+        cdof_dot_out[worldid, dofid + 3] = math.motion_cross(cvel, cdof[dofid + 3])
+        cdof_dot_out[worldid, dofid + 4] = math.motion_cross(cvel, cdof[dofid + 4])
+        cdof_dot_out[worldid, dofid + 5] = math.motion_cross(cvel, cdof[dofid + 5])
+
+        cvel += cdof[dofid + 3] * qvel[dofid + 3]
+        cvel += cdof[dofid + 4] * qvel[dofid + 4]
+        cvel += cdof[dofid + 5] * qvel[dofid + 5]
+
+        dofid += 6
+      elif jnttype == JointType.BALL:
+        cdof_dot_out[worldid, dofid + 0] = math.motion_cross(cvel, cdof[dofid + 0])
+        cdof_dot_out[worldid, dofid + 1] = math.motion_cross(cvel, cdof[dofid + 1])
+        cdof_dot_out[worldid, dofid + 2] = math.motion_cross(cvel, cdof[dofid + 2])
+
+        cvel += cdof[dofid + 0] * qvel[dofid + 0]
+        cvel += cdof[dofid + 1] * qvel[dofid + 1]
+        cvel += cdof[dofid + 2] * qvel[dofid + 2]
+
+        dofid += 3
+      else:
+        cdof_dot_out[worldid, dofid] = math.motion_cross(cvel, cdof[dofid])
+        cvel += cdof[dofid] * qvel[dofid]
+
+        dofid += 1
+
+    cvel_out[worldid, bodyid] = cvel
+
+
 @event_scope
 def com_vel(m: Model, d: Data):
   """Computes the spatial velocities (cvel) and the derivative `cdof_dot` for all bodies.
@@ -1899,13 +2041,35 @@ def com_vel(m: Model, d: Data):
   """
   wp.launch(_comvel_root, dim=(d.nworld, 6), inputs=[], outputs=[d.cvel])
 
-  for body_tree in m.body_tree:
+  if m.use_branch_traversal and m.num_branches > 0:
+    # Branch-based traversal: single kernel launch, each thread processes one branch
     wp.launch(
-      _comvel_level,
-      dim=(d.nworld, body_tree.size),
-      inputs=[m.body_parentid, m.body_jntnum, m.body_jntadr, m.body_dofadr, m.jnt_type, d.qvel, d.cdof, d.cvel, body_tree],
+      _comvel_branch,
+      dim=(d.nworld, m.num_branches),
+      inputs=[
+        m.body_parentid,
+        m.body_jntnum,
+        m.body_jntadr,
+        m.body_dofadr,
+        m.jnt_type,
+        d.qvel,
+        d.cdof,
+        d.cvel,
+        m.branch_bodies,
+        m.branch_start,
+        m.branch_length,
+      ],
       outputs=[d.cvel, d.cdof_dot],
     )
+  else:
+    # Depth-level traversal: one kernel launch per tree level
+    for body_tree in m.body_tree:
+      wp.launch(
+        _comvel_level,
+        dim=(d.nworld, body_tree.size),
+        inputs=[m.body_parentid, m.body_jntnum, m.body_jntadr, m.body_dofadr, m.jnt_type, d.qvel, d.cdof, d.cvel, body_tree],
+        outputs=[d.cvel, d.cdof_dot],
+      )
 
 
 @wp.kernel
