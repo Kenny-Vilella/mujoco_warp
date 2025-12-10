@@ -25,6 +25,51 @@ from . import warp_util
 from .warp_util import nested_kernel
 
 
+def _compute_branches(mjm: mujoco.MjModel) -> tuple[list[list[int]], np.ndarray]:
+  """Identify branches from leaf bodies to root for branch-based tree traversal.
+
+  A branch is a complete path from the first non-world body down to a leaf.
+  Each branch includes the full path, even if ancestors are shared with other
+  branches. This ensures each thread can process its branch independently
+  without race conditions.
+
+  Args:
+    mjm: MuJoCo model.
+
+  Returns:
+    Tuple of:
+      - branches: List of body ID lists, each in root-to-leaf order
+      - body_to_branch: Array mapping body ID to its first branch ID (-1 if not in any branch)
+  """
+  nbody = mjm.nbody
+  parent = mjm.body_parentid
+
+  # Find children count for each body
+  children_count = np.zeros(nbody, dtype=int)
+  for i in range(1, nbody):  # skip world body (id=0)
+    children_count[parent[i]] += 1
+
+  # Leaves are bodies with no children (excluding world body)
+  leaves = np.where((children_count == 0) & (np.arange(nbody) > 0))[0]
+
+  branches = []
+  body_to_branch = np.full(nbody, -1, dtype=int)
+
+  for leaf in leaves:
+    branch = []
+    current = leaf
+    # Walk up to root (body 0), collecting the full path
+    while current > 0:
+      branch.append(current)
+      if body_to_branch[current] == -1:
+        body_to_branch[current] = len(branches)
+      current = parent[current]
+    if branch:
+      branches.append(branch[::-1])  # Reverse: root-to-leaf order
+
+  return branches, body_to_branch
+
+
 def _create_array(data: Any, spec: wp.array, sizes: dict[str, int]) -> Union[wp.array, None]:
   """Creates a warp array and populates it with data.
 
@@ -208,12 +253,41 @@ def put_model(mjm: mujoco.MjModel) -> types.Model:
   m.has_sdf_geom = (mjm.geom_type == mujoco.mjtGeom.mjGEOM_SDF).any()
   m.block_dim = types.BlockDim()
 
-  # body ids grouped by tree level
+  # body ids grouped by tree level (depth-based traversal)
   bodies, body_depth = {}, np.zeros(mjm.nbody, dtype=int) - 1
   for i in range(mjm.nbody):
     body_depth[i] = body_depth[mjm.body_parentid[i]] + 1
     bodies.setdefault(body_depth[i], []).append(i)
   m.body_tree = tuple(wp.array(bodies[i], dtype=int) for i in sorted(bodies))
+
+  # branch-based traversal data (alternative to body_tree)
+  # each branch is a path from root to leaf, processed sequentially by one thread
+  branches, _ = _compute_branches(mjm)
+  m.num_branches = len(branches)
+
+  if m.num_branches > 0:
+    # Flatten branches for GPU
+    branch_bodies_flat = []
+    branch_start = []
+    branch_length = []
+    offset = 0
+
+    for branch in branches:
+      branch_start.append(offset)
+      branch_length.append(len(branch))
+      branch_bodies_flat.extend(branch)
+      offset += len(branch)
+
+    m.branch_bodies = np.array(branch_bodies_flat, dtype=np.int32)
+    m.branch_start = np.array(branch_start, dtype=np.int32)
+    m.branch_length = np.array(branch_length, dtype=np.int32)
+  else:
+    # Empty arrays for models with no movable bodies
+    m.branch_bodies = np.array([], dtype=np.int32)
+    m.branch_start = np.array([], dtype=np.int32)
+    m.branch_length = np.array([], dtype=np.int32)
+
+  m.use_branch_traversal = True  # Default to depth-based traversal
 
   m.mocap_bodyid = np.arange(mjm.nbody)[mjm.body_mocapid >= 0]
   m.mocap_bodyid = m.mocap_bodyid[mjm.body_mocapid[mjm.body_mocapid >= 0].argsort()]

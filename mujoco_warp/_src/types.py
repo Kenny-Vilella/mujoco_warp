@@ -1015,6 +1015,11 @@ class Model:
     has_sdf_geom: whether the model contains SDF geoms
     block_dim: block dim options
     body_tree: list of body ids by tree level
+    use_branch_traversal: use branch-based tree traversal
+    num_branches: number of branches (leaf-to-root paths)
+    branch_bodies: flattened body ids for all branches
+    branch_start: start index in branch_bodies for each branch
+    branch_length: number of bodies in each branch
     mocap_bodyid: id of body for mocap                       (nmocap,)
     body_fluid_ellipsoid: does body use ellipsoid fluid      (nbody,)
     jnt_limited_slide_hinge_adr: limited/slide/hinge jntadr
@@ -1357,6 +1362,12 @@ class Model:
   has_sdf_geom: bool
   block_dim: BlockDim
   body_tree: tuple[wp.array(dtype=int), ...]
+  # branch-based traversal (alternative to body_tree)
+  use_branch_traversal: bool
+  num_branches: int
+  branch_bodies: wp.array(dtype=int)
+  branch_start: wp.array(dtype=int)
+  branch_length: wp.array(dtype=int)
   mocap_bodyid: array("nmocap", int)
   body_fluid_ellipsoid: array("nbody", bool)
   jnt_limited_slide_hinge_adr: wp.array(dtype=int)

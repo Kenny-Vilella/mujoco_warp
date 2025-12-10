@@ -166,6 +166,125 @@ def _kinematics_level(
 
 
 @wp.kernel
+def _kinematics_branch(
+  # Model:
+  qpos0: wp.array2d(dtype=float),
+  body_parentid: wp.array(dtype=int),
+  body_mocapid: wp.array(dtype=int),
+  body_jntnum: wp.array(dtype=int),
+  body_jntadr: wp.array(dtype=int),
+  body_pos: wp.array2d(dtype=wp.vec3),
+  body_quat: wp.array2d(dtype=wp.quat),
+  body_ipos: wp.array2d(dtype=wp.vec3),
+  body_iquat: wp.array2d(dtype=wp.quat),
+  jnt_type: wp.array(dtype=int),
+  jnt_qposadr: wp.array(dtype=int),
+  jnt_pos: wp.array2d(dtype=wp.vec3),
+  jnt_axis: wp.array2d(dtype=wp.vec3),
+  # Data in:
+  qpos_in: wp.array2d(dtype=float),
+  mocap_pos_in: wp.array2d(dtype=wp.vec3),
+  mocap_quat_in: wp.array2d(dtype=wp.quat),
+  xpos_in: wp.array2d(dtype=wp.vec3),
+  xquat_in: wp.array2d(dtype=wp.quat),
+  xmat_in: wp.array2d(dtype=wp.mat33),
+  # Branch data:
+  branch_bodies: wp.array(dtype=int),
+  branch_start: wp.array(dtype=int),
+  branch_length: wp.array(dtype=int),
+  # Data out:
+  xpos_out: wp.array2d(dtype=wp.vec3),
+  xquat_out: wp.array2d(dtype=wp.quat),
+  xmat_out: wp.array2d(dtype=wp.mat33),
+  xipos_out: wp.array2d(dtype=wp.vec3),
+  ximat_out: wp.array2d(dtype=wp.mat33),
+  xanchor_out: wp.array2d(dtype=wp.vec3),
+  xaxis_out: wp.array2d(dtype=wp.vec3),
+):
+  """Process all bodies in a branch sequentially (root to leaf order)."""
+  worldid, branchid = wp.tid()
+
+  start = branch_start[branchid]
+  length = branch_length[branchid]
+
+  qpos = qpos_in[worldid]
+  body_pos_id = worldid % body_pos.shape[0]
+  body_quat_id = worldid % body_quat.shape[0]
+  jnt_axis_id = worldid % jnt_axis.shape[0]
+  qpos0_id = worldid % qpos0.shape[0]
+  jnt_pos_id = worldid % jnt_pos.shape[0]
+
+  # Process each body in the branch sequentially
+  for i in range(length):
+    bodyid = branch_bodies[start + i]
+    jntadr = body_jntadr[bodyid]
+    jntnum = body_jntnum[bodyid]
+
+    free_joint = False
+    if jntnum == 1:
+      jnt_type_ = jnt_type[jntadr]
+      free_joint = jnt_type_ == JointType.FREE
+
+    if free_joint:
+      # free joint
+      qadr = jnt_qposadr[jntadr]
+      xpos = wp.vec3(qpos[qadr], qpos[qadr + 1], qpos[qadr + 2])
+      xquat = wp.quat(qpos[qadr + 3], qpos[qadr + 4], qpos[qadr + 5], qpos[qadr + 6])
+      xquat = wp.normalize(xquat)
+      xanchor_out[worldid, jntadr] = xpos
+      xaxis_out[worldid, jntadr] = jnt_axis[jnt_axis_id, jntadr]
+    else:
+      # regular or no joints
+      # apply fixed translation and rotation relative to parent
+      pid = body_parentid[bodyid]
+
+      # mocap bodies have world body as parent
+      mocapid = body_mocapid[bodyid]
+      if pid == 0 and mocapid != -1:
+        body_pos_ = mocap_pos_in[worldid, mocapid]
+        body_quat_ = mocap_quat_in[worldid, mocapid]
+      else:
+        body_pos_ = body_pos[body_pos_id, bodyid]
+        body_quat_ = body_quat[body_quat_id, bodyid]
+
+      xpos = (xmat_in[worldid, pid] * body_pos_) + xpos_in[worldid, pid]
+      xquat = math.mul_quat(xquat_in[worldid, pid], body_quat_)
+
+      jntadr_local = jntadr
+      for _ in range(jntnum):
+        qadr = jnt_qposadr[jntadr_local]
+        jnt_type_ = jnt_type[jntadr_local]
+        jnt_axis_ = jnt_axis[jnt_axis_id, jntadr_local]
+        xanchor = math.rot_vec_quat(jnt_pos[jnt_pos_id, jntadr_local], xquat) + xpos
+        xaxis = math.rot_vec_quat(jnt_axis_, xquat)
+
+        if jnt_type_ == JointType.BALL:
+          qloc = wp.quat(qpos[qadr + 0], qpos[qadr + 1], qpos[qadr + 2], qpos[qadr + 3])
+          qloc = wp.normalize(qloc)
+          xquat = math.mul_quat(xquat, qloc)
+          # correct for off-center rotation
+          xpos = xanchor - math.rot_vec_quat(jnt_pos[jnt_pos_id, jntadr_local], xquat)
+        elif jnt_type_ == JointType.SLIDE:
+          xpos += xaxis * (qpos[qadr] - qpos0[qpos0_id, qadr])
+        elif jnt_type_ == JointType.HINGE:
+          qpos0_ = qpos0[qpos0_id, qadr]
+          qloc_ = math.axis_angle_to_quat(jnt_axis_, qpos[qadr] - qpos0_)
+          xquat = math.mul_quat(xquat, qloc_)
+          # correct for off-center rotation
+          xpos = xanchor - math.rot_vec_quat(jnt_pos[jnt_pos_id, jntadr_local], xquat)
+
+        xanchor_out[worldid, jntadr_local] = xanchor
+        xaxis_out[worldid, jntadr_local] = xaxis
+        jntadr_local += 1
+
+    xpos_out[worldid, bodyid] = xpos
+    xquat_out[worldid, bodyid] = wp.normalize(xquat)
+    xmat_out[worldid, bodyid] = math.quat_to_mat(xquat)
+    xipos_out[worldid, bodyid] = xpos + math.rot_vec_quat(body_ipos[worldid % body_ipos.shape[0], bodyid], xquat)
+    ximat_out[worldid, bodyid] = math.quat_to_mat(math.mul_quat(xquat, body_iquat[worldid % body_iquat.shape[0], bodyid]))
+
+
+@wp.kernel
 def _geom_local_to_global(
   # Model:
   body_rootid: wp.array(dtype=int),
@@ -286,11 +405,11 @@ def kinematics(m: Model, d: Data):
   """
   wp.launch(_kinematics_root, dim=(d.nworld), inputs=[], outputs=[d.xpos, d.xquat, d.xmat, d.xipos, d.ximat])
 
-  for i in range(1, len(m.body_tree)):
-    body_tree = m.body_tree[i]
+  if m.use_branch_traversal and m.num_branches > 0:
+    # Branch-based traversal: single kernel launch, each thread processes one branch
     wp.launch(
-      _kinematics_level,
-      dim=(d.nworld, body_tree.size),
+      _kinematics_branch,
+      dim=(d.nworld, m.num_branches),
       inputs=[
         m.qpos0,
         m.body_parentid,
@@ -311,10 +430,43 @@ def kinematics(m: Model, d: Data):
         d.xpos,
         d.xquat,
         d.xmat,
-        body_tree,
+        m.branch_bodies,
+        m.branch_start,
+        m.branch_length,
       ],
       outputs=[d.xpos, d.xquat, d.xmat, d.xipos, d.ximat, d.xanchor, d.xaxis],
     )
+  else:
+    # Depth-level traversal: one kernel launch per tree level
+    for i in range(1, len(m.body_tree)):
+      body_tree = m.body_tree[i]
+      wp.launch(
+        _kinematics_level,
+        dim=(d.nworld, body_tree.size),
+        inputs=[
+          m.qpos0,
+          m.body_parentid,
+          m.body_mocapid,
+          m.body_jntnum,
+          m.body_jntadr,
+          m.body_pos,
+          m.body_quat,
+          m.body_ipos,
+          m.body_iquat,
+          m.jnt_type,
+          m.jnt_qposadr,
+          m.jnt_pos,
+          m.jnt_axis,
+          d.qpos,
+          d.mocap_pos,
+          d.mocap_quat,
+          d.xpos,
+          d.xquat,
+          d.xmat,
+          body_tree,
+        ],
+        outputs=[d.xpos, d.xquat, d.xmat, d.xipos, d.ximat, d.xanchor, d.xaxis],
+      )
 
   wp.launch(
     _geom_local_to_global,
