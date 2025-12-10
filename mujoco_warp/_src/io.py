@@ -25,6 +25,117 @@ from . import warp_util
 from .warp_util import nested_kernel
 
 
+def _compute_bottom_up_segments(mjm: mujoco.MjModel) -> list[tuple[list[int], bool]]:
+  """Compute segments for bottom-up tree traversal (e.g., subtree_com accumulation).
+
+  Segments are ordered from deepest to shallowest. Each segment contains bodies
+  that can be processed together:
+  - Parallel segments: bodies at same depth that add to different parents
+  - Chain segments: linear chain of bodies (each is parent of next)
+
+  For deep narrow trees, this reduces kernel launches by grouping:
+  - Leaf siblings into parallel segments
+  - Spine chains into sequential segments
+
+  Args:
+    mjm: MuJoCo model.
+
+  Returns:
+    List of (body_ids, is_chain) tuples, ordered deepest to shallowest.
+  """
+  nbody = mjm.nbody
+  parent = mjm.body_parentid
+
+  if nbody <= 1:
+    return []
+
+  # Compute depth and children for each body
+  body_depth = np.zeros(nbody, dtype=int)
+  children_count = np.zeros(nbody, dtype=int)
+  for i in range(1, nbody):
+    body_depth[i] = body_depth[parent[i]] + 1
+    children_count[parent[i]] += 1
+
+  max_depth = body_depth.max()
+
+  # Find fork points (bodies with >1 child)
+  fork_points = set(np.where(children_count > 1)[0])
+
+  segments = []
+  processed = set([0])  # World body is always processed
+
+  # Process from deepest to shallowest
+  for depth in range(max_depth, 0, -1):
+    bodies_at_depth = np.where(body_depth == depth)[0]
+
+    if len(bodies_at_depth) == 0:
+      continue
+
+    # Group bodies at this depth by whether they can be processed in parallel
+    unprocessed = [b for b in bodies_at_depth if b not in processed]
+
+    if len(unprocessed) == 0:
+      continue
+
+    # All bodies at same depth can be processed in parallel (they add to different parents)
+    if len(unprocessed) > 0:
+      segments.append((list(unprocessed), False))  # Parallel segment
+      processed.update(unprocessed)
+
+    # After processing this depth, check if we can extend chains upward
+    # Find bodies that are now ready to be processed (all children done)
+    while True:
+      ready = []
+      for b in range(1, nbody):
+        if b in processed:
+          continue
+        # Check if all children are processed
+        children = np.where(parent == b)[0]
+        if all(c in processed for c in children):
+          ready.append(b)
+
+      if not ready:
+        break
+
+      # Group ready bodies by depth
+      ready_by_depth = {}
+      for b in ready:
+        d = body_depth[b]
+        ready_by_depth.setdefault(d, []).append(b)
+
+      # Process deepest ready bodies first
+      for d in sorted(ready_by_depth.keys(), reverse=True):
+        bodies = ready_by_depth[d]
+
+        # Check if these form a chain or can be parallel
+        if len(bodies) == 1:
+          # Single body - check if it starts a chain
+          b = bodies[0]
+          chain = [b]
+          current = parent[b]
+          while current > 0 and current not in processed:
+            # Check if current has all children processed
+            children = np.where(parent == current)[0]
+            if not all(c in processed or c in chain for c in children):
+              break
+            chain.append(current)
+            processed.add(current)
+            current = parent[current]
+          if len(chain) > 1:
+            segments.append((chain, True))  # Chain segment
+          else:
+            segments.append((chain, False))  # Single body
+          processed.add(b)
+        else:
+          # Multiple bodies at same depth - parallel
+          segments.append((bodies, False))
+          processed.update(bodies)
+
+        break  # Process one depth level at a time
+
+  return segments
+
+
 def _compute_branches(mjm: mujoco.MjModel) -> tuple[list[list[int]], np.ndarray]:
   """Identify branches from leaf bodies to root for branch-based tree traversal.
 
@@ -287,7 +398,13 @@ def put_model(mjm: mujoco.MjModel) -> types.Model:
     m.branch_start = np.array([], dtype=np.int32)
     m.branch_length = np.array([], dtype=np.int32)
 
-  m.use_branch_traversal = True  # Default to depth-based traversal
+  m.use_branch_traversal = True  # Default to branch-based traversal
+
+  # Segment-based bottom-up traversal data (for subtree_com, etc.)
+  # Stored as parallel tuples for graph capture and JAX compatibility
+  segments = _compute_bottom_up_segments(mjm)
+  m.bottom_up_segment_bodies = tuple(wp.array(bodies, dtype=int) for bodies, _ in segments)
+  m.bottom_up_segment_is_chain = tuple(is_chain for _, is_chain in segments)
 
   m.mocap_bodyid = np.arange(mjm.nbody)[mjm.body_mocapid >= 0]
   m.mocap_bodyid = m.mocap_bodyid[mjm.body_mocapid[mjm.body_mocapid >= 0].argsort()]

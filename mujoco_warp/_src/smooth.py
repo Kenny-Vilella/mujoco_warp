@@ -219,6 +219,8 @@ def _kinematics_branch(
     bodyid = branch_bodies[start + i]
     jntadr = body_jntadr[bodyid]
     jntnum = body_jntnum[bodyid]
+    ipos = body_ipos[worldid % body_ipos.shape[0], bodyid]
+    iquat = body_iquat[worldid % body_iquat.shape[0], bodyid]
 
     free_joint = False
     if jntnum == 1:
@@ -280,8 +282,8 @@ def _kinematics_branch(
     xpos_out[worldid, bodyid] = xpos
     xquat_out[worldid, bodyid] = wp.normalize(xquat)
     xmat_out[worldid, bodyid] = math.quat_to_mat(xquat)
-    xipos_out[worldid, bodyid] = xpos + math.rot_vec_quat(body_ipos[worldid % body_ipos.shape[0], bodyid], xquat)
-    ximat_out[worldid, bodyid] = math.quat_to_mat(math.mul_quat(xquat, body_iquat[worldid % body_iquat.shape[0], bodyid]))
+    xipos_out[worldid, bodyid] = xpos + math.rot_vec_quat(ipos, xquat)
+    ximat_out[worldid, bodyid] = math.quat_to_mat(math.mul_quat(xquat, iquat))
 
 
 @wp.kernel
@@ -539,6 +541,49 @@ def _subtree_com_acc(
 
 
 @wp.kernel
+def _subtree_com_acc_segment_parallel(
+  # Model:
+  body_parentid: wp.array(dtype=int),
+  # Data in:
+  subtree_com_in: wp.array2d(dtype=wp.vec3),
+  # Segment data:
+  segment_bodies: wp.array(dtype=int),
+  # Data out:
+  subtree_com_out: wp.array2d(dtype=wp.vec3),
+):
+  """Process a parallel segment - all bodies add to their parents (can use atomic_add)."""
+  worldid, idx = wp.tid()
+  bodyid = segment_bodies[idx]
+  pid = body_parentid[bodyid]
+  if bodyid != 0:
+    wp.atomic_add(subtree_com_out, worldid, pid, subtree_com_in[worldid, bodyid])
+
+
+@wp.kernel
+def _subtree_com_acc_segment_chain(
+  # Model:
+  body_parentid: wp.array(dtype=int),
+  # Data in/out:
+  subtree_com_in: wp.array2d(dtype=wp.vec3),
+  # Segment data:
+  segment_bodies: wp.array(dtype=int),
+  # Data out:
+  subtree_com_out: wp.array2d(dtype=wp.vec3),
+):
+  """Process a chain segment - bodies processed sequentially (each adds to parent)."""
+  worldid = wp.tid()
+  segment_length = segment_bodies.shape[0]
+
+  # Process chain from first (deepest) to last (shallowest)
+  for i in range(segment_length):
+    bodyid = segment_bodies[i]
+    pid = body_parentid[bodyid]
+    if bodyid != 0:
+      # No atomic needed - only one thread per world processes this chain
+      subtree_com_out[worldid, pid] += subtree_com_in[worldid, bodyid]
+
+
+@wp.kernel
 def _subtree_div(
   # Model:
   body_subtreemass: wp.array2d(dtype=float),
@@ -655,14 +700,35 @@ def com_pos(m: Model, d: Data):
   """
   wp.launch(_subtree_com_init, dim=(d.nworld, m.nbody), inputs=[m.body_mass, d.xipos], outputs=[d.subtree_com])
 
-  for i in reversed(range(len(m.body_tree))):
-    body_tree = m.body_tree[i]
-    wp.launch(
-      _subtree_com_acc,
-      dim=(d.nworld, body_tree.size),
-      inputs=[m.body_parentid, d.subtree_com, body_tree],
-      outputs=[d.subtree_com],
-    )
+  if m.use_branch_traversal and len(m.bottom_up_segment_bodies) > 0:
+    # Segment-based traversal: process segments from deepest to shallowest
+    for segment_bodies, is_chain in zip(m.bottom_up_segment_bodies, m.bottom_up_segment_is_chain):
+      if is_chain:
+        # Chain segment: single thread per world processes sequentially
+        wp.launch(
+          _subtree_com_acc_segment_chain,
+          dim=(d.nworld,),
+          inputs=[m.body_parentid, d.subtree_com, segment_bodies],
+          outputs=[d.subtree_com],
+        )
+      else:
+        # Parallel segment: all bodies add to their parents
+        wp.launch(
+          _subtree_com_acc_segment_parallel,
+          dim=(d.nworld, segment_bodies.size),
+          inputs=[m.body_parentid, d.subtree_com, segment_bodies],
+          outputs=[d.subtree_com],
+        )
+  else:
+    # Depth-level traversal: one kernel launch per tree level (reversed)
+    for i in reversed(range(len(m.body_tree))):
+      body_tree = m.body_tree[i]
+      wp.launch(
+        _subtree_com_acc,
+        dim=(d.nworld, body_tree.size),
+        inputs=[m.body_parentid, d.subtree_com, body_tree],
+        outputs=[d.subtree_com],
+      )
 
   wp.launch(_subtree_div, dim=(d.nworld, m.nbody), inputs=[m.body_subtreemass, d.subtree_com], outputs=[d.subtree_com])
   wp.launch(
@@ -870,6 +936,48 @@ def _crb_accumulate(
 
 
 @wp.kernel
+def _crb_accumulate_segment_parallel(
+  # Model:
+  body_parentid: wp.array(dtype=int),
+  # Data in:
+  crb_in: wp.array2d(dtype=vec10),
+  # Segment data:
+  segment_bodies: wp.array(dtype=int),
+  # Data out:
+  crb_out: wp.array2d(dtype=vec10),
+):
+  """Process a parallel segment - all bodies add to their parents."""
+  worldid, idx = wp.tid()
+  bodyid = segment_bodies[idx]
+  pid = body_parentid[bodyid]
+  if pid == 0:
+    return
+  wp.atomic_add(crb_out, worldid, pid, crb_in[worldid, bodyid])
+
+
+@wp.kernel
+def _crb_accumulate_segment_chain(
+  # Model:
+  body_parentid: wp.array(dtype=int),
+  # Data in/out:
+  crb_in: wp.array2d(dtype=vec10),
+  # Segment data:
+  segment_bodies: wp.array(dtype=int),
+  # Data out:
+  crb_out: wp.array2d(dtype=vec10),
+):
+  """Process a chain segment - bodies processed sequentially."""
+  worldid = wp.tid()
+  segment_length = segment_bodies.shape[0]
+
+  for i in range(segment_length):
+    bodyid = segment_bodies[i]
+    pid = body_parentid[bodyid]
+    if pid != 0:
+      crb_out[worldid, pid] += crb_in[worldid, bodyid]
+
+
+@wp.kernel
 def _qM_sparse(
   # Model:
   dof_bodyid: wp.array(dtype=int),
@@ -941,9 +1049,28 @@ def crb(m: Model, d: Data):
   """
   wp.copy(d.crb, d.cinert)
 
-  for i in reversed(range(len(m.body_tree))):
-    body_tree = m.body_tree[i]
-    wp.launch(_crb_accumulate, dim=(d.nworld, body_tree.size), inputs=[m.body_parentid, d.crb, body_tree], outputs=[d.crb])
+  if m.use_branch_traversal and len(m.bottom_up_segment_bodies) > 0:
+    # Segment-based traversal: process segments from deepest to shallowest
+    for segment_bodies, is_chain in zip(m.bottom_up_segment_bodies, m.bottom_up_segment_is_chain):
+      if is_chain:
+        wp.launch(
+          _crb_accumulate_segment_chain,
+          dim=(d.nworld,),
+          inputs=[m.body_parentid, d.crb, segment_bodies],
+          outputs=[d.crb],
+        )
+      else:
+        wp.launch(
+          _crb_accumulate_segment_parallel,
+          dim=(d.nworld, segment_bodies.size),
+          inputs=[m.body_parentid, d.crb, segment_bodies],
+          outputs=[d.crb],
+        )
+  else:
+    # Per-level traversal
+    for i in reversed(range(len(m.body_tree))):
+      body_tree = m.body_tree[i]
+      wp.launch(_crb_accumulate, dim=(d.nworld, body_tree.size), inputs=[m.body_parentid, d.crb, body_tree], outputs=[d.crb])
 
   d.qM.zero_()
   if m.opt.is_sparse:
@@ -1298,11 +1425,69 @@ def _cfrc_backward(
     wp.atomic_add(cfrc_int_out[worldid], pid, cfrc_int_in[worldid, bodyid])
 
 
+@wp.kernel
+def _cfrc_backward_segment_parallel(
+  # Model:
+  body_parentid: wp.array(dtype=int),
+  # Data in:
+  cfrc_int_in: wp.array2d(dtype=wp.spatial_vector),
+  # Segment data:
+  segment_bodies: wp.array(dtype=int),
+  # Data out:
+  cfrc_int_out: wp.array2d(dtype=wp.spatial_vector),
+):
+  """Process a parallel segment - all bodies add to their parents."""
+  worldid, idx = wp.tid()
+  bodyid = segment_bodies[idx]
+  pid = body_parentid[bodyid]
+  if bodyid != 0:
+    wp.atomic_add(cfrc_int_out[worldid], pid, cfrc_int_in[worldid, bodyid])
+
+
+@wp.kernel
+def _cfrc_backward_segment_chain(
+  # Model:
+  body_parentid: wp.array(dtype=int),
+  # Data in/out:
+  cfrc_int_in: wp.array2d(dtype=wp.spatial_vector),
+  # Segment data:
+  segment_bodies: wp.array(dtype=int),
+  # Data out:
+  cfrc_int_out: wp.array2d(dtype=wp.spatial_vector),
+):
+  """Process a chain segment - bodies processed sequentially."""
+  worldid = wp.tid()
+  segment_length = segment_bodies.shape[0]
+
+  for i in range(segment_length):
+    bodyid = segment_bodies[i]
+    pid = body_parentid[bodyid]
+    if bodyid != 0:
+      cfrc_int_out[worldid, pid] += cfrc_int_in[worldid, bodyid]
+
+
 def _rne_cfrc_backward(m: Model, d: Data):
-  for body_tree in reversed(m.body_tree):
-    wp.launch(
-      _cfrc_backward, dim=[d.nworld, body_tree.size], inputs=[m.body_parentid, d.cfrc_int, body_tree], outputs=[d.cfrc_int]
-    )
+  if m.use_branch_traversal and len(m.bottom_up_segment_bodies) > 0:
+    for segment_bodies, is_chain in zip(m.bottom_up_segment_bodies, m.bottom_up_segment_is_chain):
+      if is_chain:
+        wp.launch(
+          _cfrc_backward_segment_chain,
+          dim=(d.nworld,),
+          inputs=[m.body_parentid, d.cfrc_int, segment_bodies],
+          outputs=[d.cfrc_int],
+        )
+      else:
+        wp.launch(
+          _cfrc_backward_segment_parallel,
+          dim=(d.nworld, segment_bodies.size),
+          inputs=[m.body_parentid, d.cfrc_int, segment_bodies],
+          outputs=[d.cfrc_int],
+        )
+  else:
+    for body_tree in reversed(m.body_tree):
+      wp.launch(
+        _cfrc_backward, dim=[d.nworld, body_tree.size], inputs=[m.body_parentid, d.cfrc_int, body_tree], outputs=[d.cfrc_int]
+      )
 
 
 @wp.kernel
@@ -2818,6 +3003,49 @@ def _linear_momentum(
 
 
 @wp.kernel
+def _linear_momentum_segment_parallel(
+  # Model:
+  body_parentid: wp.array(dtype=int),
+  body_subtreemass: wp.array2d(dtype=float),
+  # Data in:
+  subtree_linvel_in: wp.array2d(dtype=wp.vec3),
+  # Segment data:
+  segment_bodies: wp.array(dtype=int),
+  # Data out:
+  subtree_linvel_out: wp.array2d(dtype=wp.vec3),
+):
+  worldid, idx = wp.tid()
+  bodyid = segment_bodies[idx]
+  if bodyid:
+    pid = body_parentid[bodyid]
+    wp.atomic_add(subtree_linvel_out[worldid], pid, subtree_linvel_in[worldid, bodyid])
+  subtree_linvel_out[worldid, bodyid] /= wp.max(MJ_MINVAL, body_subtreemass[worldid % body_subtreemass.shape[0], bodyid])
+
+
+@wp.kernel
+def _linear_momentum_segment_chain(
+  # Model:
+  body_parentid: wp.array(dtype=int),
+  body_subtreemass: wp.array2d(dtype=float),
+  # Data in/out:
+  subtree_linvel_in: wp.array2d(dtype=wp.vec3),
+  # Segment data:
+  segment_bodies: wp.array(dtype=int),
+  # Data out:
+  subtree_linvel_out: wp.array2d(dtype=wp.vec3),
+):
+  worldid = wp.tid()
+  segment_length = segment_bodies.shape[0]
+
+  for i in range(segment_length):
+    bodyid = segment_bodies[i]
+    if bodyid:
+      pid = body_parentid[bodyid]
+      subtree_linvel_out[worldid, pid] += subtree_linvel_in[worldid, bodyid]
+    subtree_linvel_out[worldid, bodyid] /= wp.max(MJ_MINVAL, body_subtreemass[worldid % body_subtreemass.shape[0], bodyid])
+
+
+@wp.kernel
 def _angular_momentum(
   # Model:
   body_parentid: wp.array(dtype=int),
@@ -2870,6 +3098,115 @@ def _angular_momentum(
   wp.atomic_add(subtree_angmom_out[worldid], pid, dL)
 
 
+@wp.kernel
+def _angular_momentum_segment_parallel(
+  # Model:
+  body_parentid: wp.array(dtype=int),
+  body_mass: wp.array2d(dtype=float),
+  body_subtreemass: wp.array2d(dtype=float),
+  # Data in:
+  xipos_in: wp.array2d(dtype=wp.vec3),
+  subtree_com_in: wp.array2d(dtype=wp.vec3),
+  subtree_linvel_in: wp.array2d(dtype=wp.vec3),
+  subtree_bodyvel_in: wp.array2d(dtype=wp.spatial_vector),
+  # Segment data:
+  segment_bodies: wp.array(dtype=int),
+  # Data out:
+  subtree_angmom_out: wp.array2d(dtype=wp.vec3),
+):
+  worldid, idx = wp.tid()
+  bodyid = segment_bodies[idx]
+
+  if bodyid == 0:
+    return
+
+  pid = body_parentid[bodyid]
+
+  xipos = xipos_in[worldid, bodyid]
+  com = subtree_com_in[worldid, bodyid]
+  com_parent = subtree_com_in[worldid, pid]
+  vel = subtree_bodyvel_in[worldid, bodyid]
+  linvel = subtree_linvel_in[worldid, bodyid]
+  linvel_parent = subtree_linvel_in[worldid, pid]
+  mass = body_mass[worldid % body_mass.shape[0], bodyid]
+  subtreemass = body_subtreemass[worldid % body_subtreemass.shape[0], bodyid]
+
+  # momentum wrt body i
+  dx = xipos - com
+  dv = wp.spatial_bottom(vel) - linvel
+  dp = dv * mass
+  dL = wp.cross(dx, dp)
+
+  # add to subtree i
+  subtree_angmom_out[worldid, bodyid] += dL
+
+  # add to parent
+  wp.atomic_add(subtree_angmom_out[worldid], pid, subtree_angmom_out[worldid, bodyid])
+
+  # momentum wrt parent
+  dx = com - com_parent
+  dv = linvel - linvel_parent
+  dv *= subtreemass
+  dL = wp.cross(dx, dv)
+  wp.atomic_add(subtree_angmom_out[worldid], pid, dL)
+
+
+@wp.kernel
+def _angular_momentum_segment_chain(
+  # Model:
+  body_parentid: wp.array(dtype=int),
+  body_mass: wp.array2d(dtype=float),
+  body_subtreemass: wp.array2d(dtype=float),
+  # Data in:
+  xipos_in: wp.array2d(dtype=wp.vec3),
+  subtree_com_in: wp.array2d(dtype=wp.vec3),
+  subtree_linvel_in: wp.array2d(dtype=wp.vec3),
+  subtree_bodyvel_in: wp.array2d(dtype=wp.spatial_vector),
+  # Segment data:
+  segment_bodies: wp.array(dtype=int),
+  # Data out:
+  subtree_angmom_out: wp.array2d(dtype=wp.vec3),
+):
+  worldid = wp.tid()
+  segment_length = segment_bodies.shape[0]
+
+  for i in range(segment_length):
+    bodyid = segment_bodies[i]
+
+    if bodyid == 0:
+      continue
+
+    pid = body_parentid[bodyid]
+
+    xipos = xipos_in[worldid, bodyid]
+    com = subtree_com_in[worldid, bodyid]
+    com_parent = subtree_com_in[worldid, pid]
+    vel = subtree_bodyvel_in[worldid, bodyid]
+    linvel = subtree_linvel_in[worldid, bodyid]
+    linvel_parent = subtree_linvel_in[worldid, pid]
+    mass = body_mass[worldid % body_mass.shape[0], bodyid]
+    subtreemass = body_subtreemass[worldid % body_subtreemass.shape[0], bodyid]
+
+    # momentum wrt body i
+    dx = xipos - com
+    dv = wp.spatial_bottom(vel) - linvel
+    dp = dv * mass
+    dL = wp.cross(dx, dp)
+
+    # add to subtree i
+    subtree_angmom_out[worldid, bodyid] += dL
+
+    # add to parent (no atomic needed in chain)
+    subtree_angmom_out[worldid, pid] += subtree_angmom_out[worldid, bodyid]
+
+    # momentum wrt parent
+    dx = com - com_parent
+    dv = linvel - linvel_parent
+    dv *= subtreemass
+    dL = wp.cross(dx, dv)
+    subtree_angmom_out[worldid, pid] += dL
+
+
 def subtree_vel(m: Model, d: Data):
   """Computes subtree linear velocity and angular momentum.
 
@@ -2885,28 +3222,80 @@ def subtree_vel(m: Model, d: Data):
   )
 
   # sum body linear momentum recursively up the kinematic tree
-  for body_tree in reversed(m.body_tree):
-    wp.launch(
-      _linear_momentum,
-      dim=[d.nworld, body_tree.size],
-      inputs=[m.body_parentid, m.body_subtreemass, d.subtree_linvel, body_tree],
-      outputs=[d.subtree_linvel],
-    )
+  if m.use_branch_traversal and len(m.bottom_up_segment_bodies) > 0:
+    for segment_bodies, is_chain in zip(m.bottom_up_segment_bodies, m.bottom_up_segment_is_chain):
+      if is_chain:
+        wp.launch(
+          _linear_momentum_segment_chain,
+          dim=(d.nworld,),
+          inputs=[m.body_parentid, m.body_subtreemass, d.subtree_linvel, segment_bodies],
+          outputs=[d.subtree_linvel],
+        )
+      else:
+        wp.launch(
+          _linear_momentum_segment_parallel,
+          dim=(d.nworld, segment_bodies.size),
+          inputs=[m.body_parentid, m.body_subtreemass, d.subtree_linvel, segment_bodies],
+          outputs=[d.subtree_linvel],
+        )
+  else:
+    for body_tree in reversed(m.body_tree):
+      wp.launch(
+        _linear_momentum,
+        dim=[d.nworld, body_tree.size],
+        inputs=[m.body_parentid, m.body_subtreemass, d.subtree_linvel, body_tree],
+        outputs=[d.subtree_linvel],
+      )
 
-  for body_tree in reversed(m.body_tree):
-    wp.launch(
-      _angular_momentum,
-      dim=[d.nworld, body_tree.size],
-      inputs=[
-        m.body_parentid,
-        m.body_mass,
-        m.body_subtreemass,
-        d.xipos,
-        d.subtree_com,
-        d.subtree_linvel,
-        d.subtree_bodyvel,
-        body_tree,
-      ],
+  if m.use_branch_traversal and len(m.bottom_up_segment_bodies) > 0:
+    for segment_bodies, is_chain in zip(m.bottom_up_segment_bodies, m.bottom_up_segment_is_chain):
+      if is_chain:
+        wp.launch(
+          _angular_momentum_segment_chain,
+          dim=(d.nworld,),
+          inputs=[
+            m.body_parentid,
+            m.body_mass,
+            m.body_subtreemass,
+            d.xipos,
+            d.subtree_com,
+            d.subtree_linvel,
+            d.subtree_bodyvel,
+            segment_bodies,
+          ],
+          outputs=[d.subtree_angmom],
+        )
+      else:
+        wp.launch(
+          _angular_momentum_segment_parallel,
+          dim=(d.nworld, segment_bodies.size),
+          inputs=[
+            m.body_parentid,
+            m.body_mass,
+            m.body_subtreemass,
+            d.xipos,
+            d.subtree_com,
+            d.subtree_linvel,
+            d.subtree_bodyvel,
+            segment_bodies,
+          ],
+          outputs=[d.subtree_angmom],
+        )
+  else:
+    for body_tree in reversed(m.body_tree):
+      wp.launch(
+        _angular_momentum,
+        dim=[d.nworld, body_tree.size],
+        inputs=[
+          m.body_parentid,
+          m.body_mass,
+          m.body_subtreemass,
+          d.xipos,
+          d.subtree_com,
+          d.subtree_linvel,
+          d.subtree_bodyvel,
+          body_tree,
+        ],
       outputs=[d.subtree_angmom],
     )
 
