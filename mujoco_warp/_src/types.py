@@ -674,6 +674,7 @@ class Option:
       zeros out the contacts at each step)
     contact_sensor_maxmatch: max number of contacts considered by contact sensor matching criteria
                              contacts matched after this value is exceded will be ignored
+    use_branch_traversal: use branch-based tree traversal
   """
 
   timestep: array("*", float)
@@ -1016,7 +1017,6 @@ class Model:
     has_sdf_geom: whether the model contains SDF geoms
     block_dim: block dim options
     body_tree: list of body ids by tree level
-    use_branch_traversal: use branch-based tree traversal
     num_branches: number of branches (leaf-to-root paths)
     branch_bodies: flattened body ids for all branches
     branch_start: start index in branch_bodies for each branch
