@@ -47,17 +47,14 @@ def _compute_bottom_up_segments(mjm: mujoco.MjModel) -> list[tuple[list[int], bo
 
   max_depth = body_depth.max()
 
-  fork_points = set(np.where(children_count > 1)[0])
-
   segments = []
-  processed = set([0])  # World body is always processed
+  processed = set([0])
   fork_points = set(np.where(children_count > 1)[0])
 
   # Process from deepest to shallowest
   for depth in range(max_depth, 0, -1):
     bodies_at_depth = np.where(body_depth == depth)[0]
     unprocessed = [b for b in bodies_at_depth if b not in processed]
-
 
     if len(bodies_at_depth) == 0 or len(unprocessed) == 0:
       continue
@@ -68,12 +65,11 @@ def _compute_bottom_up_segments(mjm: mujoco.MjModel) -> list[tuple[list[int], bo
 
     # After processing this depth, check if we can extend chains upward
     while True:
-      # Find all bodies whose children are processed, grouped by depth
+      # Find all bodies whose children are processed, i.e. ready to be processed
       ready_by_depth = {}
       for b in range(1, nbody):
         if b in processed:
           continue
-        # If all children are processed then it can be processed
         children = np.where(parent == b)[0]
         if all(c in processed for c in children):
           d = body_depth[b]
@@ -86,28 +82,30 @@ def _compute_bottom_up_segments(mjm: mujoco.MjModel) -> list[tuple[list[int], bo
       deepest_depth = max(ready_by_depth.keys())
       bodies = ready_by_depth[deepest_depth]
 
-      if len(bodies) == 1:
-        # Check if it starts a chain
-        b = bodies[0]
+      # Try to build chains for each ready body
+      parallel_bodies = []
+      for b in bodies:
         chain = [b]
         current = parent[b]
         while current > 0 and current not in processed:
-          # Check if current has all children processed
+          # Check if current is ready to be processed
           children = np.where(parent == current)[0]
           if not all(c in processed or c in chain for c in children):
             break
           chain.append(current)
           processed.add(current)
           current = parent[current]
+
         if len(chain) > 1:
-          segments.append((chain, True))  # Chain segment
+          segments.append((chain, True))
+          processed.add(b)
         else:
-          segments.append((chain, False))  # Single body
-        processed.add(b)
-      else:
-        # Multiple bodies at same depth can be processed in parallel
-        segments.append((bodies, False))
-        processed.update(bodies)
+          parallel_bodies.append(b)
+          processed.add(b)
+
+      # Process remaining single bodies in parallel
+      if parallel_bodies:
+        segments.append((parallel_bodies, False))
 
   return segments
 
