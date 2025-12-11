@@ -706,6 +706,7 @@ class Option:
   graph_conditional: bool
   run_collision_detection: bool
   contact_sensor_maxmatch: int
+  use_branch_traversal: bool
 
 
 @dataclasses.dataclass
@@ -1365,7 +1366,6 @@ class Model:
   block_dim: BlockDim
   body_tree: tuple[wp.array(dtype=int), ...]
   # branch-based traversal (alternative to body_tree)
-  use_branch_traversal: bool
   num_branches: int
   branch_bodies: wp.array(dtype=int)
   branch_start: wp.array(dtype=int)

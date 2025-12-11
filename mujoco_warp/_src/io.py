@@ -339,6 +339,8 @@ def put_model(mjm: mujoco.MjModel) -> types.Model:
   else:
     opt.contact_sensor_maxmatch = 64
 
+  opt.use_branch_traversal = True
+
   # place opt on device
   for f in dataclasses.fields(types.Option):
     if isinstance(f.type, wp.array):
@@ -397,8 +399,6 @@ def put_model(mjm: mujoco.MjModel) -> types.Model:
     m.branch_bodies = np.array([], dtype=np.int32)
     m.branch_start = np.array([], dtype=np.int32)
     m.branch_length = np.array([], dtype=np.int32)
-
-  m.use_branch_traversal = True  # Default to branch-based traversal
 
   # Segment-based bottom-up traversal data (for subtree_com, etc.)
   # Stored as parallel tuples for graph capture and JAX compatibility

@@ -427,7 +427,7 @@ def kinematics(m: Model, d: Data):
   """
   wp.launch(_kinematics_root, dim=(d.nworld), inputs=[], outputs=[d.xpos, d.xquat, d.xmat, d.xipos, d.ximat])
 
-  if m.use_branch_traversal and m.num_branches > 0:
+  if m.opt.use_branch_traversal and m.num_branches > 0:
     # Branch-based traversal
     wp.launch(
       _kinematics_branch,
@@ -698,7 +698,7 @@ def com_pos(m: Model, d: Data):
   """
   wp.launch(_subtree_com_init, dim=(d.nworld, m.nbody), inputs=[m.body_mass, d.xipos], outputs=[d.subtree_com])
 
-  if m.use_branch_traversal and len(m.bottom_up_segment_bodies) > 0:
+  if m.opt.use_branch_traversal and len(m.bottom_up_segment_bodies) > 0:
     # Segment-based traversal: Branch-based traversal + Depth-level traversal
     for segment_bodies, is_chain in zip(m.bottom_up_segment_bodies, m.bottom_up_segment_is_chain):
       if is_chain:
@@ -1024,7 +1024,7 @@ def crb(m: Model, d: Data):
   """
   wp.copy(d.crb, d.cinert)
 
-  if m.use_branch_traversal and len(m.bottom_up_segment_bodies) > 0:
+  if m.opt.use_branch_traversal and len(m.bottom_up_segment_bodies) > 0:
     # Segment-based traversal: Branch-based traversal + Depth-level traversal
     for segment_bodies, is_chain in zip(m.bottom_up_segment_bodies, m.bottom_up_segment_is_chain):
       if is_chain:
@@ -1317,7 +1317,7 @@ def _cacc_branch(
 
 
 def _rne_cacc_forward(m: Model, d: Data, flg_acc: bool = False):
-  if m.use_branch_traversal and m.num_branches > 0:
+  if m.opt.use_branch_traversal and m.num_branches > 0:
     # Branch-based traversal
     wp.launch(
       _cacc_branch,
@@ -1420,7 +1420,7 @@ def _cfrc_backward_segment_chain(
 
 
 def _rne_cfrc_backward(m: Model, d: Data):
-  if m.use_branch_traversal and len(m.bottom_up_segment_bodies) > 0:
+  if m.opt.use_branch_traversal and len(m.bottom_up_segment_bodies) > 0:
     for segment_bodies, is_chain in zip(m.bottom_up_segment_bodies, m.bottom_up_segment_is_chain):
       # Segment-based traversal: Branch-based traversal + Depth-level traversal
       if is_chain:
@@ -2179,7 +2179,7 @@ def com_vel(m: Model, d: Data):
   """
   wp.launch(_comvel_root, dim=(d.nworld, 6), inputs=[], outputs=[d.cvel])
 
-  if m.use_branch_traversal and m.num_branches > 0:
+  if m.opt.use_branch_traversal and m.num_branches > 0:
     # Branch-based traversal
     wp.launch(
       _comvel_branch,
