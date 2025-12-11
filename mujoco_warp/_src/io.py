@@ -318,53 +318,8 @@ def put_model(mjm: mujoco.MjModel) -> types.Model:
     opt_kwargs["impratio_invsqrt"] = 1.0 / np.sqrt(np.maximum(mjm.opt.impratio, mujoco.mjMINVAL))
   opt = types.Option(**opt_kwargs)
 
-  # C MuJoCo tolerance was chosen for float64 architecture, but we default to float32 on GPU
-  # adjust the tolerance for lower precision, to avoid the solver spending iterations needlessly
-  # bouncing around the optimal solution
-  opt.tolerance = max(opt.tolerance, 1e-6)
-
-  # warp only fields
-  opt.is_sparse = is_sparse(mjm)
-  ls_parallel_id = mujoco.mj_name2id(mjm, mujoco.mjtObj.mjOBJ_NUMERIC, "ls_parallel")
-  opt.ls_parallel = (ls_parallel_id > -1) and (mjm.numeric_data[mjm.numeric_adr[ls_parallel_id]] == 1)
-  opt.ls_parallel_min_step = 1.0e-6  # TODO(team): determine good default setting
-  opt.has_fluid = mjm.opt.wind.any() or mjm.opt.density > 0 or mjm.opt.viscosity > 0
-  opt.broadphase = types.BroadphaseType.NXN
-  opt.broadphase_filter = types.BroadphaseFilter.PLANE | types.BroadphaseFilter.SPHERE | types.BroadphaseFilter.OBB
-  opt.graph_conditional = True
-  opt.run_collision_detection = True
-  contact_sensor_maxmatch_id = mujoco.mj_name2id(mjm, mujoco.mjtObj.mjOBJ_NUMERIC, "contact_sensor_maxmatch")
-  if contact_sensor_maxmatch_id > -1:
-    opt.contact_sensor_maxmatch = mjm.numeric_data[mjm.numeric_adr[contact_sensor_maxmatch_id]]
-  else:
-    opt.contact_sensor_maxmatch = 64
-
-  opt.use_branch_traversal = True
-
-  # place opt on device
-  for f in dataclasses.fields(types.Option):
-    if isinstance(f.type, wp.array):
-      setattr(opt, f.name, _create_array(getattr(opt, f.name), f.type, {"*": 1}))
-    else:
-      setattr(opt, f.name, f.type(getattr(opt, f.name)))
-
-  # create stat
-  stat = types.Statistic(meaninertia=mjm.stat.meaninertia)
-
   # create model
   m = types.Model(**{f.name: getattr(mjm, f.name, None) for f in dataclasses.fields(types.Model)})
-
-  m.opt = opt
-  m.stat = stat
-
-  m.nacttrnbody = (mjm.actuator_trntype == mujoco.mjtTrn.mjTRN_BODY).sum()
-  m.nsensortaxel = mjm.mesh_vertnum[mjm.sensor_objid[mjm.sensor_type == mujoco.mjtSensor.mjSENS_TACTILE]].sum()
-  m.nsensorcontact = (mjm.sensor_type == mujoco.mjtSensor.mjSENS_CONTACT).sum()
-  m.nrangefinder = (mjm.sensor_type == mujoco.mjtSensor.mjSENS_RANGEFINDER).sum()
-  m.nmaxcondim = np.concatenate(([0], mjm.geom_condim, mjm.pair_dim)).max()
-  m.nmaxpyramid = np.maximum(1, 2 * (m.nmaxcondim - 1))
-  m.has_sdf_geom = (mjm.geom_type == mujoco.mjtGeom.mjGEOM_SDF).any()
-  m.block_dim = types.BlockDim()
 
   # body ids grouped by tree level (depth-based traversal)
   bodies, body_depth = {}, np.zeros(mjm.nbody, dtype=int) - 1
@@ -399,6 +354,51 @@ def put_model(mjm: mujoco.MjModel) -> types.Model:
     m.branch_bodies = np.array([], dtype=np.int32)
     m.branch_start = np.array([], dtype=np.int32)
     m.branch_length = np.array([], dtype=np.int32)
+
+  # C MuJoCo tolerance was chosen for float64 architecture, but we default to float32 on GPU
+  # adjust the tolerance for lower precision, to avoid the solver spending iterations needlessly
+  # bouncing around the optimal solution
+  opt.tolerance = max(opt.tolerance, 1e-6)
+
+  # warp only fields
+  opt.is_sparse = is_sparse(mjm)
+  ls_parallel_id = mujoco.mj_name2id(mjm, mujoco.mjtObj.mjOBJ_NUMERIC, "ls_parallel")
+  opt.ls_parallel = (ls_parallel_id > -1) and (mjm.numeric_data[mjm.numeric_adr[ls_parallel_id]] == 1)
+  opt.ls_parallel_min_step = 1.0e-6  # TODO(team): determine good default setting
+  opt.has_fluid = mjm.opt.wind.any() or mjm.opt.density > 0 or mjm.opt.viscosity > 0
+  opt.broadphase = types.BroadphaseType.NXN
+  opt.broadphase_filter = types.BroadphaseFilter.PLANE | types.BroadphaseFilter.SPHERE | types.BroadphaseFilter.OBB
+  opt.graph_conditional = True
+  opt.run_collision_detection = True
+  contact_sensor_maxmatch_id = mujoco.mj_name2id(mjm, mujoco.mjtObj.mjOBJ_NUMERIC, "contact_sensor_maxmatch")
+  if contact_sensor_maxmatch_id > -1:
+    opt.contact_sensor_maxmatch = mjm.numeric_data[mjm.numeric_adr[contact_sensor_maxmatch_id]]
+  else:
+    opt.contact_sensor_maxmatch = 64
+
+  opt.use_branch_traversal = m.num_branches < len(m.body_tree)
+
+  # place opt on device
+  for f in dataclasses.fields(types.Option):
+    if isinstance(f.type, wp.array):
+      setattr(opt, f.name, _create_array(getattr(opt, f.name), f.type, {"*": 1}))
+    else:
+      setattr(opt, f.name, f.type(getattr(opt, f.name)))
+
+  # create stat
+  stat = types.Statistic(meaninertia=mjm.stat.meaninertia)
+
+  m.opt = opt
+  m.stat = stat
+
+  m.nacttrnbody = (mjm.actuator_trntype == mujoco.mjtTrn.mjTRN_BODY).sum()
+  m.nsensortaxel = mjm.mesh_vertnum[mjm.sensor_objid[mjm.sensor_type == mujoco.mjtSensor.mjSENS_TACTILE]].sum()
+  m.nsensorcontact = (mjm.sensor_type == mujoco.mjtSensor.mjSENS_CONTACT).sum()
+  m.nrangefinder = (mjm.sensor_type == mujoco.mjtSensor.mjSENS_RANGEFINDER).sum()
+  m.nmaxcondim = np.concatenate(([0], mjm.geom_condim, mjm.pair_dim)).max()
+  m.nmaxpyramid = np.maximum(1, 2 * (m.nmaxcondim - 1))
+  m.has_sdf_geom = (mjm.geom_type == mujoco.mjtGeom.mjGEOM_SDF).any()
+  m.block_dim = types.BlockDim()
 
   # Segment-based bottom-up traversal data (for subtree_com, etc.)
   # Stored as parallel tuples for graph capture and JAX compatibility
