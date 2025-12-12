@@ -1365,12 +1365,10 @@ class Model:
   has_sdf_geom: bool
   block_dim: BlockDim
   body_tree: tuple[wp.array(dtype=int), ...]
-  # branch-based traversal (alternative to body_tree)
   num_branches: int
   branch_bodies: wp.array(dtype=int)
   branch_start: wp.array(dtype=int)
   branch_length: wp.array(dtype=int)
-  # segment-based bottom-up traversal
   bottom_up_segment_bodies: tuple[wp.array(dtype=int), ...]
   bottom_up_segment_is_chain: tuple[bool, ...]
   mocap_bodyid: array("nmocap", int)

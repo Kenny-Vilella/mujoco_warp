@@ -40,16 +40,12 @@ def _compute_bottom_up_segments(mjm: mujoco.MjModel) -> list[tuple[list[int], bo
     return []
 
   body_depth = np.zeros(nbody, dtype=int)
-  children_count = np.zeros(nbody, dtype=int)
   for i in range(1, nbody):
     body_depth[i] = body_depth[parent[i]] + 1
-    children_count[parent[i]] += 1
-
   max_depth = body_depth.max()
 
   segments = []
-  processed = set([0])
-  fork_points = set(np.where(children_count > 1)[0])
+  processed = [0]
 
   # Process from deepest to shallowest
   for depth in range(max_depth, 0, -1):
@@ -59,32 +55,11 @@ def _compute_bottom_up_segments(mjm: mujoco.MjModel) -> list[tuple[list[int], bo
     if len(bodies_at_depth) == 0 or len(unprocessed) == 0:
       continue
 
-    # All bodies at same depth can be processed in parallel
-    segments.append((list(unprocessed), False))
-    processed.update(unprocessed)
-
-    # After processing this depth, check if we can extend chains upward
-    while True:
-      # Find all bodies whose children are processed, i.e. ready to be processed
-      ready_by_depth = {}
-      for b in range(1, nbody):
-        if b in processed:
-          continue
-        children = np.where(parent == b)[0]
-        if all(c in processed for c in children):
-          d = body_depth[b]
-          ready_by_depth.setdefault(d, []).append(b)
-
-      if not ready_by_depth:
-        break
-
-      # Process deepest ready bodies
-      deepest_depth = max(ready_by_depth.keys())
-      bodies = ready_by_depth[deepest_depth]
-
-      # Try to build chains for each ready body
-      parallel_bodies = []
-      for b in bodies:
+    # Try to build chains for each unprocessed body at that depth
+    parallel_bodies = []
+    chain_bodies = []
+    for b in bodies_at_depth:
+      if b in unprocessed:
         chain = [b]
         current = parent[b]
         while current > 0 and current not in processed:
@@ -93,19 +68,21 @@ def _compute_bottom_up_segments(mjm: mujoco.MjModel) -> list[tuple[list[int], bo
           if not all(c in processed or c in chain for c in children):
             break
           chain.append(current)
-          processed.add(current)
+          processed.append(current)
           current = parent[current]
 
         if len(chain) > 1:
-          segments.append((chain, True))
-          processed.add(b)
+          chain_bodies.append(chain)
+          processed.append(b)
         else:
           parallel_bodies.append(b)
-          processed.add(b)
+          processed.append(b)
 
-      # Process remaining single bodies in parallel
-      if parallel_bodies:
-        segments.append((parallel_bodies, False))
+    # Add first independent bodies and then chains, order is important
+    if parallel_bodies:
+      segments.append((parallel_bodies, False))
+    for chain in chain_bodies:
+      segments.append((chain, True))
 
   return segments
 
@@ -305,13 +282,13 @@ def put_model(mjm: mujoco.MjModel) -> types.Model:
       branch_bodies_flat.extend(branch)
       offset += len(branch)
 
-    m.branch_bodies = np.array(branch_bodies_flat, dtype=np.int32)
-    m.branch_start = np.array(branch_start, dtype=np.int32)
-    m.branch_length = np.array(branch_length, dtype=np.int32)
+    m.branch_bodies = np.array(branch_bodies_flat, dtype=int)
+    m.branch_start = np.array(branch_start, dtype=int)
+    m.branch_length = np.array(branch_length, dtype=int)
   else:
-    m.branch_bodies = np.array([], dtype=np.int32)
-    m.branch_start = np.array([], dtype=np.int32)
-    m.branch_length = np.array([], dtype=np.int32)
+    m.branch_bodies = np.array([], dtype=int)
+    m.branch_start = np.array([], dtype=int)
+    m.branch_length = np.array([], dtype=int)
 
   # C MuJoCo tolerance was chosen for float64 architecture, but we default to float32 on GPU
   # adjust the tolerance for lower precision, to avoid the solver spending iterations needlessly
