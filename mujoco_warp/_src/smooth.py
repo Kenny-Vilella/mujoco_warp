@@ -2333,6 +2333,8 @@ def _solve_LD_sparse(
   y: wp.array2d(dtype=float),
 ):
   """Computes sparse backsubstitution: x = inv(L'*D*L)*y."""
+  # Sparse tree-based solve is complex - keep original multi-kernel approach
+  # This maintains correctness while we focus on merging other kernels
   wp.copy(x, y)
   for qLD_updates in reversed(m.qLD_updates):
     wp.launch(_solve_LD_sparse_x_acc_up, dim=(d.nworld, qLD_updates.size), inputs=[L, qLD_updates], outputs=[x])
@@ -2368,16 +2370,44 @@ def _tile_cholesky_solve(tile: TileSet):
   return cholesky_solve
 
 
+@wp.kernel
+def _solve_LD_dense_merged(
+  # Model:
+  nv: int,
+  # In:
+  L_in: wp.array3d(dtype=float),
+  y_in: wp.array2d(dtype=float),
+  # Out:
+  x_out: wp.array2d(dtype=float),
+):
+  """Merged kernel for dense LD backsubstitution: x = inv(L'*L)*y using scalar operations."""
+  worldid = wp.tid()
+  
+  # Forward substitution: L * temp = y
+  for i in range(nv):
+    temp_val = y_in[worldid, i]
+    for j in range(i):
+      temp_val -= L_in[worldid, i, j] * x_out[worldid, j]
+    x_out[worldid, i] = temp_val / L_in[worldid, i, i]
+  
+  # Backward substitution: L^T * x = temp
+  for i_rev in range(nv):
+    i = nv - 1 - i_rev
+    temp_val = x_out[worldid, i]
+    for j in range(i + 1, nv):
+      temp_val -= L_in[worldid, j, i] * x_out[worldid, j]
+    x_out[worldid, i] = temp_val / L_in[worldid, i, i]
+
+
 def _solve_LD_dense(m: Model, d: Data, L: wp.array3d(dtype=float), x: wp.array2d(dtype=float), y: wp.array2d(dtype=float)):
   """Computes dense backsubstitution: x = inv(L'*L)*y."""
-  for tile in m.qM_tiles:
-    wp.launch_tiled(
-      _tile_cholesky_solve(tile),
-      dim=(d.nworld, tile.adr.size),
-      inputs=[L, y, tile.adr],
-      outputs=[x],
-      block_dim=m.block_dim.cholesky_solve,
-    )
+  # Single unified kernel
+  wp.launch(
+    _solve_LD_dense_merged,
+    dim=d.nworld,
+    inputs=[m.nv, L, y],
+    outputs=[x],
+  )
 
 
 def solve_LD(

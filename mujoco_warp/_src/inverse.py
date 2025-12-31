@@ -31,6 +31,107 @@ from .types import Model
 wp.set_module_options({"enable_backward": False})
 
 
+
+def _update_constraint(m: Model, d: Data):
+  """Update constraint arrays after each solve iteration."""
+  wp.launch(
+    solver.update_constraint_kernel,
+    dim=(d.nworld),
+    inputs=[
+      m.nv,
+      m.opt.impratio,
+      d.ne,
+      d.nf,
+      d.nefc,
+      d.contact.friction,
+      d.contact.dim,
+      d.contact.efc_address,
+      d.qacc,
+      d.qfrc_smooth,
+      d.qacc_smooth,
+      d.efc.Ma,
+      d.efc.J,
+      d.efc.type,
+      d.efc.id,
+      d.efc.D,
+      d.efc.frictionloss,
+      d.efc.Jaref,
+      d.efc.cost,
+      d.efc.done,
+      d.nacon,
+    ],
+    outputs=[
+      d.qfrc_constraint,
+      d.efc.force,
+      d.efc.gauss,
+      d.efc.cost,
+      d.efc.prev_cost,
+      d.efc.state,
+    ],
+  )
+
+
+@wp.kernel
+def solve_init_jaref(
+  # Model:
+  nv: int,
+  # Data in:
+  nefc_in: wp.array(dtype=int),
+  qacc_in: wp.array2d(dtype=float),
+  efc_J_in: wp.array3d(dtype=float),
+  efc_aref_in: wp.array2d(dtype=float),
+  # Data out:
+  efc_Jaref_out: wp.array2d(dtype=float),
+):
+  worldid, efcid = wp.tid()
+
+  if efcid >= nefc_in[worldid]:
+    return
+
+  jaref = float(0.0)
+  for i in range(nv):
+    jaref += efc_J_in[worldid, efcid, i] * qacc_in[worldid, i]
+
+  efc_Jaref_out[worldid, efcid] = jaref - efc_aref_in[worldid, efcid]
+
+
+@wp.kernel
+def solve_init_efc(
+  # Data out:
+  solver_niter_out: wp.array(dtype=int),
+  efc_search_dot_out: wp.array(dtype=float),
+  efc_cost_out: wp.array(dtype=float),
+  efc_done_out: wp.array(dtype=bool),
+):
+  worldid = wp.tid()
+  efc_cost_out[worldid] = wp.inf
+  solver_niter_out[worldid] = 0
+  efc_done_out[worldid] = False
+  efc_search_dot_out[worldid] = 0.0
+
+
+def create_context(m: Model, d: Data):
+  # initialize some efc arrays
+  wp.launch(
+    solve_init_efc,
+    dim=(d.nworld),
+    outputs=[d.solver_niter, d.efc.search_dot, d.efc.cost, d.efc.done],
+  )
+
+  # jaref = d.efc_J @ d.qacc - d.efc_aref
+  wp.launch(
+    solve_init_jaref,
+    dim=(d.nworld, d.njmax),
+    inputs=[m.nv, d.nefc, d.qacc, d.efc.J, d.efc.aref],
+    outputs=[d.efc.Jaref],
+  )
+
+  # Ma = qM @ qacc
+  support.mul_m(m, d, d.efc.Ma, d.qacc, skip=d.efc.done)
+
+  _update_constraint(m, d)
+
+
 @wp.kernel
 def _qfrc_eulerdamp(
   # Model:
@@ -121,7 +222,7 @@ def inv_constraint(m: Model, d: Data):
     return
 
   # update
-  solver.create_context(m, d, grad=False)
+  create_context(m, d)
 
 
 def inverse(m: Model, d: Data):
