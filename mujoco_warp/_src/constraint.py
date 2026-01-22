@@ -131,10 +131,8 @@ def _efc_equality_connect(
   nv: int,
   nsite: int,
   opt_timestep: wp.array(dtype=float),
-  body_parentid: wp.array(dtype=int),
   body_rootid: wp.array(dtype=int),
   body_invweight0: wp.array2d(dtype=wp.vec2),
-  dof_bodyid: wp.array(dtype=int),
   site_bodyid: wp.array(dtype=int),
   eq_obj1id: wp.array(dtype=int),
   eq_obj2id: wp.array(dtype=int),
@@ -142,6 +140,7 @@ def _efc_equality_connect(
   eq_solref: wp.array2d(dtype=wp.vec2),
   eq_solimp: wp.array2d(dtype=vec5),
   eq_data: wp.array2d(dtype=vec11),
+  dof_affects_body: wp.array2d(dtype=int),
   eq_connect_adr: wp.array(dtype=int),
   # Data in:
   qvel_in: wp.array2d(dtype=float),
@@ -206,9 +205,8 @@ def _efc_equality_connect(
   Jqvel = wp.vec3f(0.0, 0.0, 0.0)
   for dofid in range(nv):  # TODO: parallelize
     jacp1, _ = support.jac(
-      body_parentid,
+      dof_affects_body,
       body_rootid,
-      dof_bodyid,
       subtree_com_in,
       cdof_in,
       pos1,
@@ -217,9 +215,8 @@ def _efc_equality_connect(
       worldid,
     )
     jacp2, _ = support.jac(
-      body_parentid,
+      dof_affects_body,
       body_rootid,
-      dof_bodyid,
       subtree_com_in,
       cdof_in,
       pos2,
@@ -722,10 +719,8 @@ def _efc_equality_weld(
   nv: int,
   nsite: int,
   opt_timestep: wp.array(dtype=float),
-  body_parentid: wp.array(dtype=int),
   body_rootid: wp.array(dtype=int),
   body_invweight0: wp.array2d(dtype=wp.vec2),
-  dof_bodyid: wp.array(dtype=int),
   site_bodyid: wp.array(dtype=int),
   site_quat: wp.array2d(dtype=wp.quat),
   eq_obj1id: wp.array(dtype=int),
@@ -734,6 +729,7 @@ def _efc_equality_weld(
   eq_solref: wp.array2d(dtype=wp.vec2),
   eq_solimp: wp.array2d(dtype=vec5),
   eq_data: wp.array2d(dtype=vec11),
+  dof_affects_body: wp.array2d(dtype=int),
   eq_wld_adr: wp.array(dtype=int),
   # Data in:
   qvel_in: wp.array2d(dtype=float),
@@ -809,9 +805,8 @@ def _efc_equality_weld(
 
   for dofid in range(nv):  # TODO: parallelize
     jacp1, jacr1 = support.jac(
-      body_parentid,
+      dof_affects_body,
       body_rootid,
-      dof_bodyid,
       subtree_com_in,
       cdof_in,
       pos1,
@@ -820,9 +815,8 @@ def _efc_equality_weld(
       worldid,
     )
     jacp2, jacr2 = support.jac(
-      body_parentid,
+      dof_affects_body,
       body_rootid,
-      dof_bodyid,
       subtree_com_in,
       cdof_in,
       pos2,
@@ -1213,11 +1207,10 @@ def _efc_contact_pyramidal(
   nv: int,
   opt_timestep: wp.array(dtype=float),
   opt_impratio_invsqrt: wp.array(dtype=float),
-  body_parentid: wp.array(dtype=int),
   body_rootid: wp.array(dtype=int),
   body_invweight0: wp.array2d(dtype=wp.vec2),
-  dof_bodyid: wp.array(dtype=int),
   geom_bodyid: wp.array(dtype=int),
+  dof_affects_body: wp.array2d(dtype=int),
   # Data in:
   qvel_in: wp.array2d(dtype=float),
   subtree_com_in: wp.array2d(dtype=wp.vec3),
@@ -1306,9 +1299,8 @@ def _efc_contact_pyramidal(
       J = float(0.0)
       Ji = float(0.0)
       jac1p, jac1r = support.jac(
-        body_parentid,
+        dof_affects_body,
         body_rootid,
-        dof_bodyid,
         subtree_com_in,
         cdof_in,
         con_pos,
@@ -1317,9 +1309,8 @@ def _efc_contact_pyramidal(
         worldid,
       )
       jac2p, jac2r = support.jac(
-        body_parentid,
+        dof_affects_body,
         body_rootid,
-        dof_bodyid,
         subtree_com_in,
         cdof_in,
         con_pos,
@@ -1383,11 +1374,10 @@ def _efc_contact_elliptic(
   nv: int,
   opt_timestep: wp.array(dtype=float),
   opt_impratio_invsqrt: wp.array(dtype=float),
-  body_parentid: wp.array(dtype=int),
   body_rootid: wp.array(dtype=int),
   body_invweight0: wp.array2d(dtype=wp.vec2),
-  dof_bodyid: wp.array(dtype=int),
   geom_bodyid: wp.array(dtype=int),
+  dof_affects_body: wp.array2d(dtype=int),
   # Data in:
   qvel_in: wp.array2d(dtype=float),
   subtree_com_in: wp.array2d(dtype=wp.vec3),
@@ -1462,9 +1452,8 @@ def _efc_contact_elliptic(
     for i in range(nv):
       J = float(0.0)
       jac1p, jac1r = support.jac(
-        body_parentid,
+        dof_affects_body,
         body_rootid,
-        dof_bodyid,
         subtree_com_in,
         cdof_in,
         cpos,
@@ -1473,9 +1462,8 @@ def _efc_contact_elliptic(
         worldid,
       )
       jac2p, jac2r = support.jac(
-        body_parentid,
+        dof_affects_body,
         body_rootid,
-        dof_bodyid,
         subtree_com_in,
         cdof_in,
         cpos,
@@ -1585,10 +1573,8 @@ def make_constraint(m: types.Model, d: types.Data):
           m.nv,
           m.nsite,
           m.opt.timestep,
-          m.body_parentid,
           m.body_rootid,
           m.body_invweight0,
-          m.dof_bodyid,
           m.site_bodyid,
           m.eq_obj1id,
           m.eq_obj2id,
@@ -1596,6 +1582,7 @@ def make_constraint(m: types.Model, d: types.Data):
           m.eq_solref,
           m.eq_solimp,
           m.eq_data,
+          m.dof_affects_body,
           m.eq_connect_adr,
           d.qvel,
           d.eq_active,
@@ -1628,10 +1615,8 @@ def make_constraint(m: types.Model, d: types.Data):
           m.nv,
           m.nsite,
           m.opt.timestep,
-          m.body_parentid,
           m.body_rootid,
           m.body_invweight0,
-          m.dof_bodyid,
           m.site_bodyid,
           m.site_quat,
           m.eq_obj1id,
@@ -1640,6 +1625,7 @@ def make_constraint(m: types.Model, d: types.Data):
           m.eq_solref,
           m.eq_solimp,
           m.eq_data,
+          m.dof_affects_body,
           m.eq_wld_adr,
           d.qvel,
           d.eq_active,
@@ -1955,11 +1941,10 @@ def make_constraint(m: types.Model, d: types.Data):
             m.nv,
             m.opt.timestep,
             m.opt.impratio_invsqrt,
-            m.body_parentid,
             m.body_rootid,
             m.body_invweight0,
-            m.dof_bodyid,
             m.geom_bodyid,
+            m.dof_affects_body,
             d.qvel,
             d.subtree_com,
             d.cdof,
@@ -2000,11 +1985,10 @@ def make_constraint(m: types.Model, d: types.Data):
             m.nv,
             m.opt.timestep,
             m.opt.impratio_invsqrt,
-            m.body_parentid,
             m.body_rootid,
             m.body_invweight0,
-            m.dof_bodyid,
             m.geom_bodyid,
+            m.dof_affects_body,
             d.qvel,
             d.subtree_com,
             d.cdof,

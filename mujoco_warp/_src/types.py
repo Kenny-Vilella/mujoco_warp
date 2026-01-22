@@ -1028,6 +1028,7 @@ class Model:
     jnt_limited_ball_adr: limited/ball jntadr
     dof_tri_row: dof lower triangle row (used in solver)
     dof_tri_col: dof lower triangle col (used in solver)
+    dof_affects_body: precomputed mask: does DOF affect body (nbody, nv)
     nxn_geom_pair: collision pair geom ids [-2, ngeom-1]
     nxn_geom_pair_filtered: valid collision pair geom ids
                             [-1, ngeom - 1]
@@ -1374,6 +1375,7 @@ class Model:
   jnt_limited_ball_adr: wp.array(dtype=int)
   dof_tri_row: wp.array(dtype=int)
   dof_tri_col: wp.array(dtype=int)
+  dof_affects_body: array("nbody", "nv", int)
   nxn_geom_pair: wp.array(dtype=wp.vec2i)
   nxn_geom_pair_filtered: wp.array(dtype=wp.vec2i)
   nxn_pairid: wp.array(dtype=wp.vec2i)
