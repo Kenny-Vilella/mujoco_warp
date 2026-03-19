@@ -1000,68 +1000,74 @@ def tendon_armature(m: Model, d: Data):
   )
 
 
-@wp.kernel
-def _copy_CSR(
-  # Model:
-  mapM2M: wp.array(dtype=int),
-  # In:
-  M_in: wp.array3d(dtype=float),
-  # Out:
-  L_out: wp.array3d(dtype=float),
-):
-  worldid, ind = wp.tid()
-  L_out[worldid, 0, ind] = M_in[worldid, 0, mapM2M[ind]]
+@cache_kernel
+def _qLD_acc_fused(nC: int, nv: int, nlevels: int):
+  """Fused sparse Cholesky factorization: all levels + copy + diag_div in one kernel."""
+  @wp.func_native(snippet="WP_TILE_SYNC();")
+  def _syncthreads():
+    pass
 
+  @wp.kernel(module="unique", enable_backward=False)
+  def kernel(
+    # Model:
+    M_rownnz: wp.array(dtype=int),
+    M_rowadr: wp.array(dtype=int),
+    mapM2M: wp.array(dtype=int),
+    # In:
+    all_updates: wp.array(dtype=wp.vec3i),
+    level_offsets: wp.array(dtype=int),
+    M_in: wp.array3d(dtype=float),
+    # Out:
+    L_out: wp.array3d(dtype=float),
+    D_out: wp.array2d(dtype=float),
+  ):
+    worldid, tid = wp.tid()
+    NC = wp.static(nC)
+    NV = wp.static(nv)
+    NLEVELS = wp.static(nlevels)
 
-@wp.kernel
-def _qLD_acc(
-  # Model:
-  M_rownnz: wp.array(dtype=int),
-  M_rowadr: wp.array(dtype=int),
-  # In:
-  qLD_updates_: wp.array(dtype=wp.vec3i),
-  L_in: wp.array3d(dtype=float),
-  # Out:
-  L_out: wp.array3d(dtype=float),
-):
-  worldid, nodeid = wp.tid()
-  update = qLD_updates_[nodeid]
-  i, k, Madr_ki = update[0], update[1], update[2]
-  Madr_i = M_rowadr[i]  # Address of row being updated
-  diag_k = M_rowadr[k] + M_rownnz[k] - 1  # Address of diagonal element of k
-  # tmp = M(k,i) / M(k,k)
-  tmp = L_out[worldid, 0, Madr_ki] / L_out[worldid, 0, diag_k]
-  for j in range(M_rownnz[i]):
-    # M(i,j) -= M(k,j) * tmp
-    wp.atomic_sub(L_out[worldid, 0], Madr_i + j, L_in[worldid, 0, M_rowadr[k] + j] * tmp)
-  # M(k,i) = tmp
-  L_out[worldid, 0, Madr_ki] = tmp
+    # Copy M to L via CSR reorder
+    for idx in range(tid, NC, wp.block_dim()):
+      L_out[worldid, 0, idx] = M_in[worldid, 0, mapM2M[idx]]
+    _syncthreads()
 
+    # Process each factorization level (deepest first)
+    for level in range(wp.static(NLEVELS)):
+      level_idx = wp.static(NLEVELS) - 1 - level
+      level_offset = level_offsets[level_idx]
+      level_size = level_offsets[level_idx + 1] - level_offset
 
-@wp.kernel
-def _qLDiag_div(
-  # Model:
-  M_rownnz: wp.array(dtype=int),
-  M_rowadr: wp.array(dtype=int),
-  # In:
-  L_in: wp.array3d(dtype=float),
-  # Out:
-  D_out: wp.array2d(dtype=float),
-):
-  worldid, dofid = wp.tid()
-  diag_i = M_rowadr[dofid] + M_rownnz[dofid] - 1  # Address of diagonal element of i
-  D_out[worldid, dofid] = 1.0 / L_in[worldid, 0, diag_i]
+      for u in range(tid, level_size, wp.block_dim()):
+        update = all_updates[level_offset + u]
+        i, k, Madr_ki = update[0], update[1], update[2]
+        Madr_i = M_rowadr[i]  # Address of row being updated
+        diag_k = M_rowadr[k] + M_rownnz[k] - 1  # Address of diagonal element of k
+        # tmp = M(k,i) / M(k,k)
+        tmp = L_out[worldid, 0, Madr_ki] / L_out[worldid, 0, diag_k]
+        for j in range(M_rownnz[i]):
+          # M(i,j) -= M(k,j) * tmp
+          wp.atomic_sub(L_out[worldid, 0], Madr_i + j, L_out[worldid, 0, M_rowadr[k] + j] * tmp)
+        L_out[worldid, 0, Madr_ki] = tmp
+      _syncthreads()
+
+    # Compute diagonal inverses
+    for dofid in range(tid, NV, wp.block_dim()):
+      diag_i = M_rowadr[dofid] + M_rownnz[dofid] - 1  # Address of diagonal element of i
+      D_out[worldid, dofid] = 1.0 / L_out[worldid, 0, diag_i]
+
+  return kernel
 
 
 def _factor_i_sparse(m: Model, d: Data, M: wp.array3d(dtype=float), L: wp.array3d(dtype=float), D: wp.array2d(dtype=float)):
   """Sparse L'*D*L factorization of inertia-like matrix M, assumed spd."""
-  wp.launch(_copy_CSR, dim=(d.nworld, m.nC), inputs=[m.mapM2M, M], outputs=[L])
-
-  for i in reversed(range(len(m.qLD_updates))):
-    qLD_updates = m.qLD_updates[i]
-    wp.launch(_qLD_acc, dim=(d.nworld, qLD_updates.size), inputs=[m.M_rownnz, m.M_rowadr, qLD_updates, L], outputs=[L])
-
-  wp.launch(_qLDiag_div, dim=(d.nworld, m.nv), inputs=[m.M_rownnz, m.M_rowadr, L], outputs=[D])
+  nlevels = len(m.qLD_updates)
+  wp.launch(
+    _qLD_acc_fused(m.nC, m.nv, nlevels),
+    dim=(d.nworld, m.block_dim.qLD_acc_fused),
+    inputs=[m.M_rownnz, m.M_rowadr, m.mapM2M, m.qLD_all_updates, m.qLD_level_offsets, M],
+    outputs=[L, D],
+    block_dim=m.block_dim.qLD_acc_fused,
+  )
 
 
 @cache_kernel
