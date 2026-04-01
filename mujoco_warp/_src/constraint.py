@@ -681,11 +681,14 @@ def _equality_flex(is_sparse: bool):
     nv: int,
     opt_timestep: wp.array(dtype=float),
     opt_disableflags: int,
+    flex_edgeadr: wp.array(dtype=int),
+    flex_edgenum: wp.array(dtype=int),
     flexedge_length0: wp.array(dtype=float),
     flexedge_invweight0: wp.array(dtype=float),
     flexedge_J_rownnz: wp.array(dtype=int),
     flexedge_J_rowadr: wp.array(dtype=int),
     flexedge_J_colind: wp.array(dtype=int),
+    eq_obj1id: wp.array(dtype=int),
     eq_solref: wp.array2d(dtype=wp.vec2),
     eq_solimp: wp.array2d(dtype=vec5),
     eq_flex_adr: wp.array(dtype=int),
@@ -715,6 +718,9 @@ def _equality_flex(is_sparse: bool):
   ):
     worldid, eqflexid, edgeid = wp.tid()
     eqid = eq_flex_adr[eqflexid]
+    flexid = eq_obj1id[eqid]
+    if edgeid < flex_edgeadr[flexid] or edgeid >= flex_edgeadr[flexid] + flex_edgenum[flexid]:
+      return
 
     wp.atomic_add(ne_out, worldid, 1)
     efcid = wp.atomic_add(nefc_out, worldid, 1)
@@ -2415,11 +2421,14 @@ def make_constraint(m: types.Model, d: types.Data):
           m.nv,
           m.opt.timestep,
           m.opt.disableflags,
+          m.flex_edgeadr,
+          m.flex_edgenum,
           m.flexedge_length0,
           m.flexedge_invweight0,
           m.flexedge_J_rownnz,
           m.flexedge_J_rowadr,
           m.flexedge_J_colind,
+          m.eq_obj1id,
           m.eq_solref,
           m.eq_solimp,
           m.eq_flex_adr,
